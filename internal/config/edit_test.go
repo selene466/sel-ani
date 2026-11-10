@@ -278,3 +278,15 @@ func TestSaveLoginIncompleteAndNoLeaks(t *testing.T) {
 		t.Error("an incomplete login must not be saved")
 	}
 }
+
+func TestEditReplacesMultiLineArray(t *testing.T) {
+	src := "[player]\nargs = [\n  \"--a\", # c ]\n  \"--b]\",\n]\ncommand = \"mpv\"\n"
+	got, err := Edit(src, "player.args", []string{"--x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "[player]\nargs = [\"--x\"]\ncommand = \"mpv\"\n"
+	if got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}

@@ -24,13 +24,16 @@ func (s *Switch) Set(t *Tracker, wait time.Duration) string {
 	old := s.cur
 	s.cur = t
 	s.mu.Unlock()
+	// the old tracker goes first: it holds the send lease, and a flush of
+	// the new one started meanwhile would give up on it
+	var sum string
+	if old != nil {
+		sum = old.Close(wait)
+	}
 	if t != nil {
 		t.Flush()
 	}
-	if old != nil {
-		return old.Close(wait)
-	}
-	return ""
+	return sum
 }
 
 // Close closes the active tracker and returns its summary.

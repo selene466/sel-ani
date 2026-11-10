@@ -271,7 +271,8 @@ func (m *Model) saveItem(it item, v any) tea.Cmd {
 func (m *Model) applyConfig(cfg config.Config) tea.Cmd {
 	prev := m.cfg
 	m.cfg = cfg
-	m.opts.App.Mode, m.opts.App.Quality = domain.Mode(cfg.Mode), cfg.Quality
+	m.opts.App.SetMode(domain.Mode(cfg.Mode))
+	m.opts.App.SetQuality(cfg.Quality)
 	m.st = newStyles(cfg.Theme)
 	m.g = glyphsFor(cfg.UI.Font)
 	want := cfg.UI.Cover && m.opts.CoverSupported

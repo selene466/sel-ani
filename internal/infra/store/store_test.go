@@ -82,10 +82,10 @@ func TestHistory(t *testing.T) {
 		t.Errorf("got  %+v\nwant %+v", got, want)
 	}
 
-	// going back to an earlier episode moves progress back too
+	// going back to an earlier episode keeps the higher progress
 	save("1", "a-1", "A")
 	got, _ = db.Load()
-	if got[0].Episode != "1" {
+	if got[0].Episode != "2" || got[0].AnimeID != "a-1" {
 		t.Errorf("rewatch: %+v", got[0])
 	}
 	eps, err := db.WatchedEpisodes("a-1")

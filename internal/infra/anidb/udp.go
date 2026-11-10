@@ -356,7 +356,14 @@ func (u *UDP) send(ctx context.Context, cmd string, params ...string) (Reply, er
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
+	// cancelling ctx must end the wait now, not after the reply timeout
+	conn := u.conn
+	stop := context.AfterFunc(ctx, func() { conn.SetReadDeadline(time.Now()) })
+	defer stop()
 	for {
+		if ctx.Err() != nil {
+			return Reply{}, ctx.Err()
+		}
 		u.conn.SetReadDeadline(deadline)
 		n, err := u.conn.Read(u.buf[:])
 		if err != nil {

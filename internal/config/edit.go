@@ -65,7 +65,11 @@ func Edit(src, key string, value any) (string, error) {
 		if strings.HasSuffix(lines[i], "\r") {
 			eol = "\r"
 		}
-		lines[i] = newLine + eol
+		last := i
+		if lines[i] != "" && setRe.MatchString(lines[i]) {
+			last = valueEnd(lines, i)
+		}
+		lines = append(lines[:i], append([]string{newLine + eol}, lines[last+1:]...)...)
 		return strings.Join(lines, "\n")
 	}
 	switch {
@@ -87,6 +91,39 @@ func Edit(src, key string, value any) (string, error) {
 	}
 	lines = append(lines[:at], append([]string{newLine}, lines[at:]...)...)
 	return strings.Join(lines, "\n"), nil
+}
+
+// valueEnd returns the last line of the value that starts on line i: an
+// array may span several lines, and replacing only the first would leave the
+// rest behind as garbage.
+func valueEnd(lines []string, i int) int {
+	depth := 0
+	for j := i; j < len(lines); j++ {
+		l := lines[j]
+		if j == i {
+			l = l[strings.Index(l, "=")+1:]
+		}
+		inStr := false
+		for k := 0; k < len(l); k++ {
+			switch c := l[k]; {
+			case inStr && c == '\\':
+				k++
+			case c == '"':
+				inStr = !inStr
+			case inStr:
+			case c == '#':
+				k = len(l)
+			case c == '[':
+				depth++
+			case c == ']':
+				depth--
+			}
+		}
+		if depth <= 0 {
+			return j
+		}
+	}
+	return len(lines) - 1
 }
 
 // tableHeader returns the name of a "[table]" line.

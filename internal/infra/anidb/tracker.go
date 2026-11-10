@@ -39,6 +39,8 @@ type Tracker struct {
 	owner  string
 	mu     sync.Mutex
 	done   chan struct{} // open while a flush runs
+	busy   bool          // a flush goroutine is between start and its last look at the queue
+	again  bool          // Flush was called while busy: look at the queue once more
 	cancel context.CancelFunc
 	report []string
 	synced int
@@ -137,12 +139,9 @@ func (t *Tracker) Flush() {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.done != nil {
-		select {
-		case <-t.done:
-		default:
-			return // still running; it picks up the new item
-		}
+	if t.busy {
+		t.again = true // still running; it looks again before it exits
+		return
 	}
 	if t.owner == "" {
 		var b [4]byte
@@ -152,6 +151,7 @@ func (t *Tracker) Flush() {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.cancel = cancel
 	t.done = make(chan struct{})
+	t.busy = true
 	go t.run(ctx, t.done)
 }
 
@@ -163,6 +163,28 @@ func (t *Tracker) note(s string) {
 
 func (t *Tracker) run(ctx context.Context, done chan struct{}) {
 	defer close(done)
+	// released: busy was already cleared (under mu) by the empty-queue check,
+	// after which a new run may own it
+	released := false
+	defer func() {
+		t.mu.Lock()
+		if !released {
+			t.busy, t.again = false, false
+		}
+		t.mu.Unlock()
+	}()
+	// idle reports whether the queue is settled: a Flush that came in while
+	// it was being read gets another round instead of being lost
+	idle := func() bool {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if t.again && ctx.Err() == nil {
+			t.again = false
+			return false
+		}
+		t.busy, t.again, released = false, false, true
+		return true
+	}
 	if ok, err := t.Store.Acquire(leaseName, t.owner, leaseTTL); err != nil || !ok {
 		return
 	}
@@ -170,6 +192,9 @@ func (t *Tracker) run(ctx context.Context, done chan struct{}) {
 	for ctx.Err() == nil {
 		items, err := t.Store.DueOutbox(batch)
 		if err != nil || len(items) == 0 {
+			if err == nil && !idle() {
+				continue
+			}
 			return
 		}
 		for _, it := range items {

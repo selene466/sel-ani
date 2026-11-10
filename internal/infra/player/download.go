@@ -77,7 +77,9 @@ func (d *Downloader) argv(m domain.Media, haveYtdlp bool) []string {
 			a = append(a, in...)
 			a = append(a, "-i", m.Stream.Audio)
 		}
-		a = append(a, "-c", "copy", out)
+		a = append(a, "-c", "copy")
+		a = append(a, d.Extra...)
+		return append(a, out)
 	}
 	return append(a, d.Extra...)
 }

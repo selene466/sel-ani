@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"sel-ani/internal/domain"
@@ -56,6 +57,28 @@ type App struct {
 	Mode     domain.Mode
 	Quality  string
 	Warn     func(string) // optional
+
+	mu sync.RWMutex // guards Mode and Quality against SetMode/SetQuality
+}
+
+// SetMode and SetQuality change the audio mode and the stream quality while
+// requests run in other goroutines. Those read them with settings.
+func (a *App) SetMode(m domain.Mode) {
+	a.mu.Lock()
+	a.Mode = m
+	a.mu.Unlock()
+}
+
+func (a *App) SetQuality(q string) {
+	a.mu.Lock()
+	a.Quality = q
+	a.mu.Unlock()
+}
+
+func (a *App) settings() (domain.Mode, string) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.Mode, a.Quality
 }
 
 // Entry is one row of a list.
@@ -106,11 +129,12 @@ func total(n int) string {
 }
 
 func (a *App) entries(items []domain.Anime, prog map[string]string, latest bool) []Entry {
+	mode, _ := a.settings()
 	out := make([]Entry, len(items))
 	for i, it := range items {
 		w, inList := prog[it.ID]
 		e := Entry{Anime: it, Watched: w, InList: inList}
-		avail := it.Available(a.Mode)
+		avail := it.Available(mode)
 		e.New = inList && isNew(avail, w)
 		base := total(avail) + "/" + total(it.Episodes)
 		if latest {
@@ -128,7 +152,8 @@ func (a *App) entries(items []domain.Anime, prog map[string]string, latest bool)
 // Latest returns the newest releases, all of them: the site serves one
 // list and it is short.
 func (a *App) Latest(ctx context.Context) (Listing, error) {
-	all, err := a.Provider.Latest(ctx, a.Mode)
+	mode, _ := a.settings()
+	all, err := a.Provider.Latest(ctx, mode)
 	if err != nil {
 		return Listing{}, err
 	}
@@ -190,9 +215,10 @@ func (a *App) MyList(ctx context.Context) (Listing, error) {
 	// how many episodes are out: only known for anime on the latest list,
 	// which is cached; a failure just means no [N] marks
 	avail := map[string]int{}
-	if latest, err := a.Provider.Latest(ctx, a.Mode); err == nil {
+	mode, _ := a.settings()
+	if latest, err := a.Provider.Latest(ctx, mode); err == nil {
 		for _, it := range latest {
-			avail[it.ID] = it.Available(a.Mode)
+			avail[it.ID] = it.Available(mode)
 		}
 	}
 	sortList(list)
@@ -339,13 +365,14 @@ func (a *App) Play(ctx context.Context, an domain.Anime, ep domain.Episode) erro
 			a.warn("tracking: " + err.Error())
 		}
 	}
-	st, err := a.Provider.Stream(ctx, ep, a.Mode)
+	mode, quality := a.settings()
+	st, err := a.Provider.Stream(ctx, ep, mode)
 	if err != nil {
-		return fmt.Errorf("episode %s (%s): %w", ep.Number, a.Mode, err)
+		return fmt.Errorf("episode %s (%s): %w", ep.Number, mode, err)
 	}
-	l, fallback := SelectQuality(st.Links, a.Quality)
+	l, fallback := SelectQuality(st.Links, quality)
 	if fallback {
-		a.warn(a.Quality + " not found, using best")
+		a.warn(quality + " not found, using best")
 	}
 	if l.URL == "" {
 		return domain.ErrNoSources

@@ -96,6 +96,7 @@ type Model struct {
 	sent     map[uint32]bool       // images transmitted to the terminal
 	status   string
 	statErr  bool
+	statSeq  int             // identifies the status the clear timer belongs to
 	keep     int             // cursor to restore after the next list load, -1 = none
 	hydrated map[string]bool // anime already looked up for a missing cover
 	mem      map[string]int  // last cursor per list view
@@ -241,7 +242,8 @@ func (m *Model) play(an domain.Anime, ep domain.Episode) tea.Cmd {
 
 func (m *Model) say(s string, isErr bool) tea.Cmd {
 	m.status, m.statErr = s, isErr
-	seq := len(s)
+	m.statSeq++
+	seq := m.statSeq
 	return tea.Tick(6*time.Second, func(time.Time) tea.Msg { return clearMsg{seq: seq} })
 }
 
@@ -302,9 +304,15 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		}
 		m.loading = false
 		if msg.err != nil {
-			m.list, m.cursor = app.Listing{}, 0
+			m.list, m.cursor, m.keep = app.Listing{}, 0, -1
 			m.refilter()
 			return m.say(msg.err.Error(), true)
+		}
+		// a reload may reorder the list (watching moves an anime up, syncing
+		// moves finished ones down): the cursor follows its anime, not its row
+		prev := ""
+		if e, ok := m.selected(); ok {
+			prev = e.Anime.ID
 		}
 		m.list = msg.l
 		if len(m.list.Entries) > app.SearchLimit && m.sec == secSearch {
@@ -319,6 +327,12 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		case m.filter == "":
 			if c, ok := m.mem[m.memKey()]; ok {
 				m.cursor = min(c, max(m.rowCount()-1, 0))
+			}
+		}
+		for i, e := range m.shown {
+			if prev != "" && e.Anime.ID == prev {
+				m.cursor = i
+				break
 			}
 		}
 		m.status = ""
@@ -398,7 +412,7 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 			return m.load()
 		}
 	case clearMsg:
-		if msg.seq == len(m.status) {
+		if msg.seq == m.statSeq {
 			m.status = ""
 		}
 	}
@@ -601,7 +615,7 @@ func (m *Model) refilter() {
 // clearList empties the list and the filter, for a section about to load.
 func (m *Model) clearList() {
 	m.list, m.filter, m.input = app.Listing{}, "", ""
-	m.cursor, m.offset = 0, 0
+	m.cursor, m.offset, m.keep = 0, 0, -1
 	m.refilter()
 }
 
@@ -762,9 +776,9 @@ func (m *Model) homeKey(s string) tea.Cmd {
 
 func (m *Model) toggleMode() tea.Cmd {
 	if m.opts.App.Mode == domain.ModeSub {
-		m.opts.App.Mode = domain.ModeDub
+		m.opts.App.SetMode(domain.ModeDub)
 	} else {
-		m.opts.App.Mode = domain.ModeSub
+		m.opts.App.SetMode(domain.ModeSub)
 	}
 	cmds := []tea.Cmd{m.say("mode: "+string(m.opts.App.Mode), false)}
 	if !m.home {

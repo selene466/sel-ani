@@ -149,7 +149,7 @@ func TestDownloaderArgv(t *testing.T) {
 		t.Errorf("yt-dlp:\n got %q\nwant %q", got, want)
 	}
 	got = d.argv(media, true) // audio track forces ffmpeg
-	want = []string{"ffmpeg", "-extension_picky", "0", "-referer", "https://ref/", "-loglevel", "error", "-stats", "-i", "https://v/1080.m3u8", "-extension_picky", "0", "-referer", "https://ref/", "-i", "https://a/en.m3u8", "-c", "copy", "/dl/Frieren Episode 1.mp4", "-x"}
+	want = []string{"ffmpeg", "-extension_picky", "0", "-referer", "https://ref/", "-loglevel", "error", "-stats", "-i", "https://v/1080.m3u8", "-extension_picky", "0", "-referer", "https://ref/", "-i", "https://a/en.m3u8", "-c", "copy", "-x", "/dl/Frieren Episode 1.mp4"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ffmpeg:\n got %q\nwant %q", got, want)
 	}

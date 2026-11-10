@@ -245,19 +245,28 @@ func (p *Exec) Play(ctx context.Context, m domain.Media) error {
 	if err != nil {
 		return fmt.Errorf("starting %s: %w", argv[0], err)
 	}
+	p.mu.Lock()
 	p.running = pr
+	p.mu.Unlock()
 	return nil
 }
 
 // Wait blocks until the detached player exits or ctx is done. Cancelling
 // leaves the player running. Its exit status is not an error for us.
 func (p *Exec) Wait(ctx context.Context) error {
-	if p.running == nil {
+	p.mu.Lock()
+	pr := p.running
+	p.mu.Unlock()
+	if pr == nil {
 		return nil
 	}
 	select {
-	case <-p.running.done:
-		p.running = nil
+	case <-pr.done:
+		p.mu.Lock()
+		if p.running == pr {
+			p.running = nil
+		}
+		p.mu.Unlock()
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -267,11 +276,13 @@ func (p *Exec) Wait(ctx context.Context) error {
 // Stop ends the detached player: SIGTERM to its process group, SIGKILL if
 // it is still alive after the grace period. Always returns in bounded time.
 func (p *Exec) Stop() error {
+	p.mu.Lock()
 	pr := p.running
+	p.running = nil
+	p.mu.Unlock()
 	if pr == nil {
 		return nil
 	}
-	p.running = nil
 	select {
 	case <-pr.done:
 		return nil // already exited

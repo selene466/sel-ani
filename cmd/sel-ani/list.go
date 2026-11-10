@@ -45,9 +45,12 @@ func (m menu) pick(ctx context.Context, prompt string, items []item) (idx int, o
 	byText := map[string]int{}
 	for i, it := range items {
 		line := lineClean.Replace(it.text)
-		if _, dup := byText[line]; !dup {
-			byText[line] = i
+		if _, dup := byText[line]; dup {
+			// dmenu answers with the text: two equal lines would both
+			// select the first one
+			line += fmt.Sprintf(" (%d)", i+1)
 		}
+		byText[line] = i
 		if it.icon != "" {
 			line += "\x00icon\x1f" + it.icon
 		}

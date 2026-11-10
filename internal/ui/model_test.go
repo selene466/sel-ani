@@ -942,3 +942,18 @@ func TestMouseSectionsListAndBack(t *testing.T) {
 		t.Error("right click again returns to the main menu")
 	}
 }
+
+// A reload that reorders the list (watching moves an anime to the top) must
+// leave the cursor on the same anime.
+func TestReloadKeepsCursorOnAnime(t *testing.T) {
+	h := newHarness(t, false)
+	e := func(id string) app.Entry { return app.Entry{Anime: domain.Anime{ID: id, Title: id}} }
+	h.m.list = app.Listing{Entries: []app.Entry{e("a"), e("b"), e("c")}}
+	h.m.refilter()
+	h.m.cursor = 2 // c
+	h.m.seq = 7
+	h.send(listMsg{seq: 7, l: app.Listing{Entries: []app.Entry{e("c"), e("a"), e("b")}}})
+	if got, _ := h.m.selected(); got.Anime.ID != "c" {
+		t.Errorf("cursor on %q after reorder, want c", got.Anime.ID)
+	}
+}

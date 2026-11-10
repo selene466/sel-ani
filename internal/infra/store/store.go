@@ -223,7 +223,8 @@ func (d *DB) Load() ([]domain.HistoryEntry, error) {
 	return out, rows.Err()
 }
 
-// Save records e as the latest watched episode of its anime.
+// Save records e as watched. The anime's progress is its highest episode:
+// rewatching an earlier one only moves it up the recent list.
 func (d *DB) Save(e domain.HistoryEntry) error {
 	if e.AnimeID == "" || e.Episode == "" {
 		return errors.New("history: empty anime id or episode")
@@ -242,7 +243,9 @@ func (d *DB) Save(e domain.HistoryEntry) error {
 	}
 	if _, err := tx.Exec(`
 		INSERT INTO watch (anime_id, episode, watched_at) VALUES (?, ?, ?)
-		ON CONFLICT (anime_id) DO UPDATE SET episode = excluded.episode, watched_at = excluded.watched_at`,
+		ON CONFLICT (anime_id) DO UPDATE SET
+			episode = CASE WHEN CAST(excluded.episode AS REAL) >= CAST(watch.episode AS REAL) THEN excluded.episode ELSE watch.episode END,
+			watched_at = excluded.watched_at`,
 		e.AnimeID, e.Episode, at); err != nil {
 		return err
 	}
