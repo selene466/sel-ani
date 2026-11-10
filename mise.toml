@@ -1,0 +1,55 @@
+[tools]
+go = "1.27.1"
+
+[vars]
+version = "{{ exec(command='git describe --tags --always --dirty 2>/dev/null || echo dev') }}"
+
+[tasks.build]
+description = "Build a static, stripped binary into ./dist"
+env = { CGO_ENABLED = "0" }
+sources = ["go.mod", "go.sum", "cmd/**/*.go", "internal/**/*.go", "internal/**/*.toml"]
+outputs = ["dist/sel-ani"]
+run = 'go build -trimpath -ldflags "-s -w -X main.version={{vars.version}}" -o dist/sel-ani ./cmd/sel-ani'
+
+[tasks."build:all"]
+description = "Cross-compile release binaries into ./dist"
+env = { CGO_ENABLED = "0" }
+run = '''
+for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+  os=${t%/*}; arch=${t#*/}
+  GOOS=$os GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version={{vars.version}}" -o "dist/sel-ani-$os-$arch" ./cmd/sel-ani
+done
+'''
+
+[tasks.test]
+description = "Run all tests with the race detector"
+run = "go test -race ./..."
+
+[tasks."test:short"]
+description = "Run unit tests only (skips the headless browser test)"
+run = "go test -short ./..."
+
+[tasks.cover]
+description = "Test coverage summary"
+depends = ["dist-dir"]
+run = "go test -short -coverprofile=dist/cover.out ./... && go tool cover -func=dist/cover.out | tail -1"
+
+[tasks.lint]
+description = "gofmt and go vet"
+run = [
+  'test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }',
+  "go vet ./...",
+]
+
+[tasks.run]
+description = "Build and run"
+depends = ["build"]
+run = "./dist/sel-ani"
+
+[tasks.clean]
+description = "Remove build output"
+run = "rm -rf dist"
+
+[tasks.dist-dir]
+hide = true
+run = "mkdir -p dist"

@@ -1,0 +1,109 @@
+# sel-ani configuration
+#
+# sel-ani looks for this file in, first match wins:
+#   Linux / macOS: $XDG_CONFIG_HOME/sel-ani/config.toml, or
+#                  ~/.config/sel-ani/config.toml when XDG_CONFIG_HOME is unset
+#                  (macOS also: ~/Library/Application Support/sel-ani/config.toml)
+#   Windows:       %AppData%\sel-ani\config.toml, then
+#                  %USERPROFILE%\.config\sel-ani\config.toml
+# When none exists, a setup asks for the player, menu and quality and creates the first one.
+# Use `sel-ani --config path/to/config.toml` to load another file instead.
+# Every key is optional; unknown keys are reported as errors.
+# Command line flags override these settings.
+
+# "sub" or "dub".
+mode = "sub"
+
+# "best", "worst", or a resolution such as "1080p" or "720p".
+quality = "best"
+
+# Where --download saves episodes. A leading ~ is your home directory.
+download_dir = "."
+
+# Only accept a search result whose title equals the query.
+exact_match = false
+
+# Log "<title> Episode <n>" to the system log with logger(1); view with `sel-ani -l`.
+log_episodes = true
+
+# Watch history, AniDB links and caches are kept in db.sqlite next to this file.
+
+[player]
+# Player command; leave unset to auto-detect (mpv, flatpak mpv, vlc; iina on macOS).
+# Allowed: mpv, vlc, iina, iina-cli, syncplay, catt, celluloid, haruna, mplayer,
+# "flatpak:io.mpv.Mpv", as a command name or an absolute path.
+# command = "mpv"
+
+# Extra player arguments, e.g. ["--fs"].
+args = []
+
+# Keep the player attached to the terminal instead of running it in the background.
+no_detach = false
+
+# Exit with the player's exit code after playing (implies no_detach).
+exit_after_play = false
+
+# Skip intros with ani-skip (mpv and syncplay only).
+skip_intro = false
+
+[menu]
+# fzf, rofi, dmenu, or builtin (a plain prompt, needs no other program).
+# When not started from a terminal, fzf is replaced by rofi or dmenu if installed.
+program = "fzf"
+
+# Extra menu arguments, e.g. ["--height=40%"].
+args = []
+
+[provider]
+# The streaming site, miruro.cx or a mirror of it. It is the only source.
+# miruro.cx sits behind Cloudflare: enable [browser] below if it blocks you.
+base_url = "https://miruro.cx"
+
+# miruro.cx servers to try, preferred first. Hard sub is tried on every
+# server before soft sub (separate subtitle file) on any; dub mode uses the
+# dub track.
+# Servers that only offer an embedded player are skipped (bun, currently),
+# without a request. hop is last: its audio comes as a separate stream, which
+# plays with stutter. Empty = site order.
+# Known: sun, bee, hop, ally, kiwi, moo, knob, nun, bun, cog, telli.
+servers = ["bun", "sun", "bee", "hop"]
+
+# User-Agent sent with every request.
+# user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+# Timeout per request (Go duration, at least 1s). Network errors are retried once.
+timeout = "20s"
+
+[browser]
+# Fallback for Cloudflare challenges through a real browser (go-rod).
+# Only used when a plain request gets a challenge page. Never downloads a browser.
+enabled = false
+
+# Attach to a running browser started with --remote-debugging-port=9222 (most reliable).
+# remote_url = "http://127.0.0.1:9222"
+
+# Otherwise launch this browser; unset looks in the usual places.
+# Allowed: chromium, chromium-browser, google-chrome, google-chrome-stable, brave,
+# brave-browser, microsoft-edge, microsoft-edge-stable, helium, or the same apps on macOS.
+# bin = "/usr/bin/chromium"
+
+# Headless browsers are often detected; try false if the challenge is not passed.
+headless = true
+
+[anidb]
+# Track watched episodes in your AniDB MyList. Off by default.
+# Each anime is matched to AniDB once, using AniDB's title list (downloaded at
+# most once a day), without asking; anime no title names for sure are not
+# tracked. Watched episodes are sent in the background, at most one packet
+# every 4 seconds.
+enabled = false
+
+# Everything the AniDB login uses (registered client name and version, username,
+# password, UDP API key) lives in credentials.toml next to this file, so this one
+# stays free of secrets. sel-ani creates it (mode 0600) like this file.
+
+server = "api.anidb.net:9000"
+
+# A fixed local port lets the AniDB session last between runs, which saves
+# login requests. 0 picks any port.
+local_port = 45678
