@@ -26,6 +26,13 @@ const (
 	LatestTTL   = 10 * time.Minute
 )
 
+type refreshKey struct{}
+
+// WithRefresh returns a context whose Latest call skips the cached read.
+func WithRefresh(ctx context.Context) context.Context {
+	return context.WithValue(ctx, refreshKey{}, true)
+}
+
 // Provider caches Search and Episodes. Stream is passed through: stream
 // urls carry expiring tokens.
 type Provider struct {
@@ -41,7 +48,7 @@ type Provider struct {
 
 func (p *Provider) Search(ctx context.Context, query, cursor string) (domain.Page, error) {
 	key := "search:" + strings.Join(strings.Fields(strings.ToLower(query)), " ") + "|" + cursor
-	v, err := cached(p, key, or(p.SearchTTL, SearchTTL), nil, func() ([]domain.Page, error) {
+	v, err := cached(p, false, key, or(p.SearchTTL, SearchTTL), nil, func() ([]domain.Page, error) {
 		pg, err := p.Next.Search(ctx, query, cursor)
 		if len(pg.Items) == 0 {
 			return nil, err
@@ -57,7 +64,8 @@ func (p *Provider) Search(ctx context.Context, query, cursor string) (domain.Pag
 // Latest is cached briefly. It also remembers how many episodes each
 // listed anime has out, so Episodes can tell a cached list is behind.
 func (p *Provider) Latest(ctx context.Context, mode domain.Mode) ([]domain.Anime, error) {
-	v, err := cached(p, "latest:"+string(mode), LatestTTL, nil, func() ([]domain.Anime, error) {
+	skip, _ := ctx.Value(refreshKey{}).(bool)
+	v, err := cached(p, skip, "latest:"+string(mode), LatestTTL, nil, func() ([]domain.Anime, error) {
 		return p.Next.Latest(ctx, mode)
 	})
 	p.mu.Lock()
@@ -76,7 +84,7 @@ func (p *Provider) Episodes(ctx context.Context, animeID string) ([]domain.Episo
 	want := p.known[animeID]
 	p.mu.Unlock()
 	stale := func(v []domain.Episode) bool { return len(v) < want }
-	return cached(p, "episodes:"+animeID, or(p.EpisodesTTL, EpisodesTTL), stale, func() ([]domain.Episode, error) {
+	return cached(p, false, "episodes:"+animeID, or(p.EpisodesTTL, EpisodesTTL), stale, func() ([]domain.Episode, error) {
 		return p.Next.Episodes(ctx, animeID)
 	})
 }
@@ -85,7 +93,7 @@ func (p *Provider) Episodes(ctx context.Context, animeID string) ([]domain.Episo
 const InfoTTL = 7 * 24 * time.Hour
 
 func (p *Provider) Info(ctx context.Context, animeID string) (domain.Anime, error) {
-	v, err := cached(p, "info:"+animeID, InfoTTL, nil, func() ([]domain.Anime, error) {
+	v, err := cached(p, false, "info:"+animeID, InfoTTL, nil, func() ([]domain.Anime, error) {
 		a, err := p.Next.Info(ctx, animeID)
 		if err != nil {
 			return nil, err
@@ -106,8 +114,8 @@ func (p *Provider) Stream(ctx context.Context, ep domain.Episode, mode domain.Mo
 // failures never fail the request: the cache is an optimization.
 // Errors and empty results are not cached, so a hiccup is not remembered.
 // A cached value that stale (optional) rejects is fetched again.
-func cached[T any](p *Provider, key string, ttl time.Duration, stale func([]T) bool, fetch func() ([]T, error)) ([]T, error) {
-	if !p.Refresh {
+func cached[T any](p *Provider, skip bool, key string, ttl time.Duration, stale func([]T) bool, fetch func() ([]T, error)) ([]T, error) {
+	if !p.Refresh && !skip {
 		if b, ok, err := p.Store.CacheGet(key, ttl); err == nil && ok {
 			var v []T
 			if json.Unmarshal(b, &v) == nil && (stale == nil || !stale(v)) {

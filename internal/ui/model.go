@@ -5,6 +5,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"sel-ani/internal/app"
 	"sel-ani/internal/config"
 	"sel-ani/internal/domain"
+	"sel-ani/internal/infra/cache"
 	"sel-ani/internal/infra/image"
 	"sel-ani/internal/infra/kitty"
 )
@@ -104,6 +106,7 @@ type Model struct {
 	offset   int             // first visible row of the list
 	epOff    int
 	quit     bool
+	alpha    map[section]bool // sections sorted by title instead of list order
 }
 
 type coverState struct {
@@ -120,7 +123,7 @@ func New(o Options) *Model {
 	}
 	return &Model{
 		opts: o, cfg: o.Config, st: newStyles(o.Theme), g: glyphsFor(o.Config.UI.Font), ctx: ctx,
-		pngs: map[string]coverState{}, sent: map[uint32]bool{}, hydrated: map[string]bool{}, mem: map[string]int{}, epMem: map[string]int{},
+		pngs: map[string]coverState{}, sent: map[uint32]bool{}, hydrated: map[string]bool{}, mem: map[string]int{}, alpha: map[section]bool{}, epMem: map[string]int{},
 		home: true, status: o.Notice, keep: -1,
 	}
 }
@@ -166,11 +169,17 @@ type (
 // Init implements tea.Model.
 func (m *Model) Init() tea.Cmd { return m.sync() }
 
-func (m *Model) load() tea.Cmd {
+func (m *Model) load() tea.Cmd { return m.loadWith(false) }
+
+// loadWith loads the section; refresh skips the cached Latest.
+func (m *Model) loadWith(refresh bool) tea.Cmd {
 	m.seq++
 	m.loading, m.more = true, false
 	seq, sec, q := m.seq, m.sec, m.query
 	a, ctx := m.opts.App, m.ctx
+	if refresh {
+		ctx = cache.WithRefresh(ctx)
+	}
 	return func() tea.Msg {
 		var l app.Listing
 		var err error
@@ -511,6 +520,27 @@ func (m *Model) key(k tea.KeyPressMsg) tea.Cmd {
 		return m.episodeKey(s)
 	}
 	switch s {
+	case "s":
+		if m.sec == secLatest || m.sec == secMyList {
+			prev := ""
+			if e, ok := m.selected(); ok {
+				prev = e.Anime.ID
+			}
+			m.alpha[m.sec] = !m.alpha[m.sec]
+			m.refilter()
+			m.cursor, m.offset = 0, 0
+			for i, e := range m.shown {
+				if e.Anime.ID == prev {
+					m.cursor = i
+					break
+				}
+			}
+		}
+	case "r":
+		if m.sec == secLatest && !m.loading {
+			m.keep = m.cursor
+			return m.loadWith(true)
+		}
 	case "h", "left", "esc", "backspace":
 		return m.back()
 	case "j", "down":
@@ -590,6 +620,16 @@ func (m *Model) setFilter(text string) {
 // refilter recomputes the shown entries from the list and the filter. Every
 // word of the filter must appear in one of the anime's titles.
 func (m *Model) refilter() {
+	m.filterShown()
+	if m.alpha[m.sec] {
+		m.shown = append([]app.Entry(nil), m.shown...)
+		sort.SliceStable(m.shown, func(i, j int) bool {
+			return strings.ToLower(m.shown[i].Anime.Name()) < strings.ToLower(m.shown[j].Anime.Name())
+		})
+	}
+}
+
+func (m *Model) filterShown() {
 	words := strings.Fields(strings.ToLower(m.filter))
 	if len(words) == 0 {
 		m.shown = m.list.Entries
@@ -691,7 +731,7 @@ func (m *Model) memKey() string {
 	if m.sec == secSearch {
 		q = m.query
 	}
-	return fmt.Sprintf("%d|%s|%s", m.sec, m.opts.App.Mode, q)
+	return fmt.Sprintf("%d|%s|%s|%t", m.sec, m.opts.App.Mode, q, m.alpha[m.sec])
 }
 
 // remember stores the cursors, so coming back to a view finds them again.
