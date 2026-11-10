@@ -50,8 +50,8 @@ func (f *fakeProvider) Stream(_ context.Context, ep domain.Episode, _ domain.Mod
 
 type fakeStore struct{ saved []domain.HistoryEntry }
 
-func (s *fakeStore) Load() ([]domain.HistoryEntry, error) {
-	return []domain.HistoryEntry{{AnimeID: "a2", Episode: "1"}}, nil
+func (s *fakeStore) Progress() (map[string]string, error) {
+	return map[string]string{"a2": "1", "l1": "3"}, nil
 }
 func (s *fakeStore) Save(e domain.HistoryEntry) error { s.saved = append(s.saved, e); return nil }
 func (s *fakeStore) WatchedEpisodes(string) ([]string, error) {

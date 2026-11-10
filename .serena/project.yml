@@ -118,7 +118,9 @@ ls_additional_workspace_folders: []
 #     - "**/bin/**"
 #     - "**/obj/**"
 # Note: global ignored_paths from serena_config.yml are also applied additively.
-ignored_paths: []
+ignored_paths:
+- "**/testdata/**"
+- "dist/**"
 
 # whether the project is in read-only mode
 # If set to true, all editing tools will be disabled and attempts to use them will result in an error
@@ -166,7 +168,7 @@ added_modes:
 
 # initial prompt for the project. It will always be given to the LLM upon activating the project
 # (contrary to the memories, which are loaded on demand).
-initial_prompt: ""
+initial_prompt: "Go 1.27 TUI app (bubbletea v2). Hexagonal layout: internal/domain (types, ports) <- internal/app (use cases) <- internal/ui; adapters in internal/infra/*. Prefer symbolic tools (find_symbol, find_referencing_symbols, replace_symbol_body) over reading whole files. Verify with: mise run lint && mise run test:short. Read memories suggested_commands and architecture first."
 
 # time budget (seconds) per tool call for the retrieval of additional symbol information
 # such as docstrings or parameter information.

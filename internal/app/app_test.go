@@ -56,8 +56,19 @@ func (s *fakeStore) Set(k, v string) error {
 	return nil
 }
 
-func (s *fakeStore) Load() ([]domain.HistoryEntry, error) { return s.hist, nil }
-func (s *fakeStore) Save(e domain.HistoryEntry) error     { s.saved = append(s.saved, e); return nil }
+func (s *fakeStore) Progress() (map[string]string, error) {
+	out := map[string]string{}
+	for _, h := range s.hist {
+		out[h.AnimeID] = h.Episode
+	}
+	for _, e := range s.list {
+		if _, ok := out[e.Anime.ID]; !ok {
+			out[e.Anime.ID] = e.Watched
+		}
+	}
+	return out, nil
+}
+func (s *fakeStore) Save(e domain.HistoryEntry) error { s.saved = append(s.saved, e); return nil }
 func (s *fakeStore) WatchedEpisodes(string) ([]string, error) {
 	var out []string
 	for _, e := range s.saved {

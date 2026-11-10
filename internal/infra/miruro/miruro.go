@@ -52,24 +52,20 @@ type Provider struct {
 	lastPage  time.Time
 }
 
-// waitPage sleeps until SearchGap has passed since the last search request.
-func (p *Provider) waitPage(ctx context.Context) error {
+// pace claims the next search slot. A next page waits until SearchGap has
+// passed since the last search request; concurrent searches queue.
+func (p *Provider) pace(ctx context.Context, nextPage bool) error {
 	p.paceMu.Lock()
 	defer p.paceMu.Unlock()
-	if d := time.Until(p.lastPage.Add(p.SearchGap)); d > 0 {
+	if d := time.Until(p.lastPage.Add(p.SearchGap)); nextPage && d > 0 {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(d):
 		}
 	}
-	return nil
-}
-
-func (p *Provider) markPage() {
-	p.paceMu.Lock()
 	p.lastPage = time.Now()
-	p.paceMu.Unlock()
+	return nil
 }
 
 // Configure changes the site and the server preference of later requests.
@@ -136,11 +132,10 @@ func (p *Provider) Search(ctx context.Context, query, cursor string) (domain.Pag
 	q := url.Values{"q": {query}}
 	if cursor != "" {
 		q.Set("cursor", cursor)
-		if err := p.waitPage(ctx); err != nil {
-			return domain.Page{}, err
-		}
 	}
-	defer p.markPage()
+	if err := p.pace(ctx, cursor != ""); err != nil {
+		return domain.Page{}, err
+	}
 	pg, err := p.data(ctx, "/search", q)
 	if err != nil {
 		return domain.Page{}, err
@@ -288,12 +283,7 @@ func (p *Provider) Info(ctx context.Context, animeID string) (domain.Anime, erro
 	}
 	a := anime(m.ID, m.Title, m.Episodes, m.Counts)
 	a.Description, a.Format, a.Status = m.Description, m.Format, m.Status
-	for _, c := range []string{m.CoverImage.ExtraLarge, m.CoverImage.Large, m.CoverImage.Medium} {
-		if c != "" {
-			a.CoverURL = c
-			break
-		}
-	}
+	a.CoverURL = cmp.Or(m.CoverImage.ExtraLarge, m.CoverImage.Large, m.CoverImage.Medium)
 	return a, nil
 }
 
@@ -328,12 +318,14 @@ type sources struct {
 		MAL []string `json:"mal"`
 	} `json:"externalIds"`
 	SourcesData struct {
-		ProviderOrder []string `json:"providerOrder"`
-		Tracks        []struct {
-			Track     string    `json:"track"`
-			Providers []offered `json:"providers"`
-		} `json:"tracks"`
+		ProviderOrder []string     `json:"providerOrder"`
+		Tracks        []trackOffer `json:"tracks"`
 	} `json:"sourcesData"`
+}
+
+type trackOffer struct {
+	Track     string    `json:"track"`
+	Providers []offered `json:"providers"`
 }
 
 type offered struct {
@@ -388,33 +380,46 @@ func (p *Provider) Stream(ctx context.Context, ep domain.Episode, mode domain.Mo
 	// hard sub on every server before soft sub on any: soft-sub servers
 	// tend to split audio into its own stream, which plays choppily
 	var tried []string
-	for _, track := range tracks(mode) {
-		for _, name := range order {
-			for _, t := range src.SourcesData.Tracks {
-				if t.Track != track {
-					continue
-				}
-				for _, o := range t.Providers {
-					if o.Provider != name {
-						continue
-					}
-					s, err := p.resolve(ctx, o, track)
-					if err == nil {
-						s.MalID = st.MalID
-						return s, nil
-					}
-					if ctx.Err() != nil {
-						return st, ctx.Err()
-					}
-					tried = append(tried, fmt.Sprintf("%s/%s: %v", name, track, err))
-				}
-			}
+	for _, c := range candidates(src.SourcesData.Tracks, tracks(mode), order) {
+		s, err := p.resolve(ctx, c.offered, c.track)
+		if err == nil {
+			s.MalID = st.MalID
+			return s, nil
 		}
+		if ctx.Err() != nil {
+			return st, ctx.Err()
+		}
+		tried = append(tried, fmt.Sprintf("%s/%s: %v", c.Provider, c.track, err))
 	}
 	if len(tried) == 0 {
 		return st, fmt.Errorf("%w for %s on servers %s", domain.ErrNoSources, mode, strings.Join(order, ", "))
 	}
 	return st, fmt.Errorf("%w for %s (%s)", domain.ErrNoSources, mode, strings.Join(tried, "; "))
+}
+
+type candidate struct {
+	offered
+	track string
+}
+
+// candidates lists the offers to try: by track preference, then server order.
+func candidates(have []trackOffer, wanted, order []string) []candidate {
+	var out []candidate
+	for _, track := range wanted {
+		for _, name := range order {
+			for _, t := range have {
+				if t.Track != track {
+					continue
+				}
+				for _, o := range t.Providers {
+					if o.Provider == name {
+						out = append(out, candidate{o, track})
+					}
+				}
+			}
+		}
+	}
+	return out
 }
 
 // resolve returns the first playable server of o.

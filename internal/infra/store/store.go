@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -123,7 +124,7 @@ func Open(path string) (*DB, error) {
 	f.Close()
 	// journal_mode is set by migrate, after the file is known to be ours:
 	// switching to WAL rewrites the header of a file we may refuse
-	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
+	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_txlock=immediate"
 	sdb, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -139,6 +140,19 @@ func Open(path string) (*DB, error) {
 }
 
 func (d *DB) Close() error { return d.db.Close() }
+
+// one scans a single row; ok is false when there is none.
+func one[T any](row *sql.Row, dst func(*T) []any) (v T, ok bool, err error) {
+	err = row.Scan(dst(&v)...)
+	if errors.Is(err, sql.ErrNoRows) {
+		return v, false, nil
+	}
+	return v, err == nil, err
+}
+
+func (d *DB) scalar(q string, args ...any) (string, bool, error) {
+	return one(d.db.QueryRow(q, args...), func(s *string) []any { return []any{s} })
+}
 
 func (d *DB) migrate() error {
 	var v, id, tables int
@@ -186,8 +200,6 @@ func (d *DB) migrate() error {
 }
 
 func (d *DB) unix() int64 { return d.now().Unix() }
-
-// ---- history (domain.History)
 
 func (d *DB) Load() ([]domain.HistoryEntry, error) {
 	rows, err := d.db.Query(`
@@ -290,8 +302,6 @@ func (d *DB) WatchTimes(animeID string) (map[string]time.Time, error) {
 	return out, rows.Err()
 }
 
-// ---- anime and their AniDB link
-
 type execer interface {
 	Exec(string, ...any) (sql.Result, error)
 }
@@ -320,35 +330,24 @@ func upsertAnime(x execer, a domain.Anime) error {
 	return err
 }
 
-// RememberAnime stores the titles of an anime without touching history.
 func (d *DB) RememberAnime(a domain.Anime) error { return upsertAnime(d.db, a) }
 
-// Anime returns what is known about an anime.
 func (d *DB) Anime(animeID string) (domain.Anime, bool, error) {
-	a := domain.Anime{ID: animeID}
-	err := d.db.QueryRow(`SELECT title, alt_title, COALESCE(total_episodes, 0), native, cover_url, description, format, status
-		FROM anime WHERE anime_id = ?`, animeID).Scan(&a.Title, &a.AltTitle, &a.Episodes, &a.Native, &a.CoverURL, &a.Description, &a.Format, &a.Status)
-	if errors.Is(err, sql.ErrNoRows) {
-		return a, false, nil
-	}
-	return a, err == nil, err
+	a, ok, err := one(d.db.QueryRow(`SELECT title, alt_title, COALESCE(total_episodes, 0), native, cover_url, description, format, status
+		FROM anime WHERE anime_id = ?`, animeID), func(a *domain.Anime) []any {
+		return []any{&a.Title, &a.AltTitle, &a.Episodes, &a.Native, &a.CoverURL, &a.Description, &a.Format, &a.Status}
+	})
+	a.ID = animeID
+	return a, ok, err
 }
 
 // AID returns the AniDB id of an anime. decided is false when no match was
 // attempted yet; aid 0 with decided means "has no AniDB entry".
 func (d *DB) AID(animeID string) (aid int, decided bool, err error) {
-	var v sql.NullInt64
-	err = d.db.QueryRow(`SELECT aid FROM anime WHERE anime_id = ?`, animeID).Scan(&v)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, false, nil
-	}
-	if err != nil {
-		return 0, false, err
-	}
-	return int(v.Int64), v.Valid, nil
+	v, ok, err := one(d.db.QueryRow(`SELECT aid FROM anime WHERE anime_id = ?`, animeID), func(v *sql.NullInt64) []any { return []any{v} })
+	return int(v.Int64), ok && v.Valid, err
 }
 
-// SetAID stores the AniDB link. source says who decided: auto or user.
 func (d *DB) SetAID(animeID string, aid int, source string) error {
 	res, err := d.db.Exec(`UPDATE anime SET aid = ?, aid_source = ?, aid_at = ? WHERE anime_id = ?`, aid, source, d.unix(), animeID)
 	if err != nil {
@@ -360,23 +359,17 @@ func (d *DB) SetAID(animeID string, aid int, source string) error {
 	return err
 }
 
-// ---- response cache
-
 // CacheGet returns the value of key when it is younger than maxAge.
 func (d *DB) CacheGet(key string, maxAge time.Duration) ([]byte, bool, error) {
-	var v []byte
-	var at int64
-	err := d.db.QueryRow(`SELECT value, fetched_at FROM cache WHERE key = ?`, key).Scan(&v, &at)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, false, nil
+	type row struct {
+		v  []byte
+		at int64
 	}
-	if err != nil {
+	r, ok, err := one(d.db.QueryRow(`SELECT value, fetched_at FROM cache WHERE key = ?`, key), func(r *row) []any { return []any{&r.v, &r.at} })
+	if !ok || err != nil || d.now().Sub(time.Unix(r.at, 0)) > maxAge {
 		return nil, false, err
 	}
-	if d.now().Sub(time.Unix(at, 0)) > maxAge {
-		return nil, false, nil
-	}
-	return v, true, nil
+	return r.v, true, nil
 }
 
 func (d *DB) CachePut(key string, v []byte) error {
@@ -393,19 +386,14 @@ func (d *DB) PruneCache(maxAge time.Duration) error {
 	return err
 }
 
-// ---- key/value state
-
 func (d *DB) Get(key string) (string, bool, error) {
-	var v string
-	err := d.db.QueryRow(`SELECT value FROM kv WHERE key = ?`, key).Scan(&v)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
-	return v, err == nil, err
+	return d.scalar(`SELECT value FROM kv WHERE key = ?`, key)
 }
 
-func (d *DB) Set(key, value string) error {
-	_, err := d.db.Exec(`INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
+func (d *DB) Set(key, value string) error { return setKV(d.db, key, value) }
+
+func setKV(x execer, key, value string) error {
+	_, err := x.Exec(`INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
 	return err
 }
 
@@ -418,41 +406,32 @@ func (d *DB) Delete(key string) error {
 // must not talk to AniDB at the same time: together they would break the
 // rate limit.
 func (d *DB) Acquire(name, owner string, ttl time.Duration) (bool, error) {
-	key := "lease:" + name
-	now := d.unix()
+	key, now := "lease:"+name, d.unix()
 	tx, err := d.db.Begin()
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
 	var v string
-	err = tx.QueryRow(`SELECT value FROM kv WHERE key = ?`, key).Scan(&v)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return false, err
-	}
-	if err == nil {
+	if err := tx.QueryRow(`SELECT value FROM kv WHERE key = ?`, key).Scan(&v); err == nil {
 		holder, expStr, _ := strings.Cut(v, "|")
-		var exp int64
-		fmt.Sscan(expStr, &exp)
-		if holder != owner && exp > now {
+		if exp, _ := strconv.ParseInt(expStr, 10, 64); holder != owner && exp > now {
 			return false, nil
 		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return false, err
 	}
-	val := fmt.Sprintf("%s|%d", owner, now+int64(ttl.Seconds()))
-	if _, err := tx.Exec(`INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, val); err != nil {
+	if err := setKV(tx, key, fmt.Sprintf("%s|%d", owner, now+int64(ttl.Seconds()))); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()
 }
 
 func (d *DB) Release(name, owner string) error {
-	_, err := d.db.Exec(`DELETE FROM kv WHERE key = ? AND value LIKE ?`, "lease:"+name, owner+"|%")
+	_, err := d.db.Exec(`DELETE FROM kv WHERE key = ? AND substr(value, 1, ?) = ?`, "lease:"+name, len(owner)+1, owner+"|")
 	return err
 }
 
-// ---- AniDB titles
-
-// Title is one line of the AniDB title dump.
 type Title struct {
 	AID   int
 	Type  int // 1 main, 2 synonym, 3 short, 4 official
@@ -509,7 +488,6 @@ func (d *DB) queryTitles(q string, args ...any) ([]Title, error) {
 	return out, rows.Err()
 }
 
-// ExactTitles returns titles whose normalized form equals norm.
 func (d *DB) ExactTitles(norm string) ([]Title, error) {
 	return d.queryTitles(`SELECT aid, type, lang, title, norm FROM anidb_title WHERE norm = ?`, norm)
 }
@@ -523,18 +501,12 @@ func (d *DB) TitlesLike(word string, limit int) ([]Title, error) {
 // MainTitle returns the title to show for aid: the main romaji title,
 // else any romaji title, else Japanese, else English, else anything.
 func (d *DB) MainTitle(aid int) (string, error) {
-	var s string
-	err := d.db.QueryRow(`SELECT title FROM anidb_title WHERE aid = ?
+	s, _, err := d.scalar(`SELECT title FROM anidb_title WHERE aid = ?
 		ORDER BY (lang = 'x-jat' AND type = 1) DESC, lang = 'x-jat' DESC, lang = 'ja' DESC, lang = 'en' DESC,
 			type = 1 DESC, type = 4 DESC, rowid
-		LIMIT 1`, aid).Scan(&s)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
+		LIMIT 1`, aid)
 	return s, err
 }
-
-// ---- AniDB outbox
 
 // OutboxItem is a pending "episode watched" update for AniDB.
 type OutboxItem struct {
@@ -602,10 +574,29 @@ func (d *DB) OutboxFailed(id int64, msg string) error {
 	return err
 }
 
-// ---- my list
+// Progress maps each anime id to its last watched episode: from the watch
+// history, else "" for anime linked to AniDB.
+func (d *DB) Progress() (map[string]string, error) {
+	rows, err := d.db.Query(`
+		SELECT anime_id, episode FROM watch
+		UNION ALL
+		SELECT anime_id, '' FROM anime a WHERE aid > 0 AND NOT EXISTS (SELECT 1 FROM watch w WHERE w.anime_id = a.anime_id)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, ep string
+		if err := rows.Scan(&id, &ep); err != nil {
+			return nil, err
+		}
+		out[id] = ep
+	}
+	return out, rows.Err()
+}
 
-// MyList returns every anime with an AniDB link (aid > 0), unfinished first
-// is left to the caller.
+// MyList returns every anime with an AniDB link (aid > 0).
 func (d *DB) MyList() ([]domain.ListEntry, error) {
 	rows, err := d.db.Query(`
 		SELECT a.anime_id, a.title, a.alt_title, COALESCE(a.total_episodes, 0), a.native, a.cover_url,
@@ -641,7 +632,6 @@ func (d *DB) MyList() ([]domain.ListEntry, error) {
 	return out, rows.Err()
 }
 
-// PutMyList records AniDB's own progress for an aid.
 func (d *DB) PutMyList(aid, watched, total int) error {
 	_, err := d.db.Exec(`
 		INSERT INTO mylist (aid, watched, total, fetched_at) VALUES (?, ?, ?, ?)
@@ -650,20 +640,13 @@ func (d *DB) PutMyList(aid, watched, total int) error {
 	return err
 }
 
-// ---- cover images
-
 // ImageGet returns a stored cover and marks it as used now.
 func (d *DB) ImageGet(url string) ([]byte, bool, error) {
-	var v []byte
-	err := d.db.QueryRow(`SELECT png FROM image WHERE url = ?`, url).Scan(&v)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, false, nil
+	v, ok, err := one(d.db.QueryRow(`SELECT png FROM image WHERE url = ?`, url), func(v *[]byte) []any { return []any{v} })
+	if ok {
+		_, _ = d.db.Exec(`UPDATE image SET last_used = ? WHERE url = ?`, d.unix(), url)
 	}
-	if err != nil {
-		return nil, false, err
-	}
-	_, _ = d.db.Exec(`UPDATE image SET last_used = ? WHERE url = ?`, d.unix(), url)
-	return v, true, nil
+	return v, ok, err
 }
 
 // ImagePut stores a cover, then evicts the least recently used ones until

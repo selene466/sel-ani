@@ -184,15 +184,12 @@ func (m memState) Delete(k string) error              { delete(m, k); return nil
 
 func newClient(srv *fakeServer, st memState, port int) (*UDP, *[]time.Duration) {
 	var waits []time.Duration
-	u := &UDP{
-		Cfg: Config{Server: srv.addr, LocalPort: port, Client: "selani", ClientVersion: 1,
-			Username: "user", Password: "p&ss", APIKey: srv.apiKey},
-		State:   st,
-		Timeout: 500 * time.Millisecond,
-		sleep: func(_ context.Context, d time.Duration) error {
-			waits = append(waits, d)
-			return nil
-		},
+	u := NewUDP(Config{Server: srv.addr, LocalPort: port, Client: "selani", ClientVersion: 1,
+		Username: "user", Password: "p&ss", APIKey: srv.apiKey}, st)
+	u.Timeout = 500 * time.Millisecond
+	u.sleep = func(_ context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		return nil
 	}
 	return u, &waits
 }

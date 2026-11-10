@@ -1,5 +1,6 @@
 [tools]
 go = "1.27.1"
+"go:golang.org/x/tools/gopls" = "latest"
 
 [vars]
 version = "{{ exec(command='git describe --tags --always --dirty 2>/dev/null || echo dev') }}"

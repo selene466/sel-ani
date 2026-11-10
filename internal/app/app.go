@@ -4,6 +4,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -30,7 +31,7 @@ const (
 
 // Store is the persistence the use cases need (implemented by store.DB).
 type Store interface {
-	Load() ([]domain.HistoryEntry, error)
+	Progress() (map[string]string, error)
 	Save(domain.HistoryEntry) error
 	WatchedEpisodes(animeID string) ([]string, error)
 	RememberAnime(domain.Anime) error
@@ -83,29 +84,6 @@ func (a *App) warn(s string) {
 	}
 }
 
-// progress returns the last watched episode per anime id, from the watch
-// history and the my list.
-func (a *App) progress() (map[string]string, error) {
-	hist, err := a.Store.Load()
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]string, len(hist))
-	for _, h := range hist {
-		out[h.AnimeID] = h.Episode
-	}
-	list, err := a.Store.MyList()
-	if err != nil {
-		return nil, err
-	}
-	for _, e := range list {
-		if _, ok := out[e.Anime.ID]; !ok {
-			out[e.Anime.ID] = e.Watched
-		}
-	}
-	return out, nil
-}
-
 // isNew reports whether more episodes are out than were watched. Unknown
 // counts never mark.
 func isNew(avail int, watched string) bool {
@@ -154,7 +132,7 @@ func (a *App) Latest(ctx context.Context) (Listing, error) {
 	if err != nil {
 		return Listing{}, err
 	}
-	prog, err := a.progress()
+	prog, err := a.Store.Progress()
 	if err != nil {
 		return Listing{}, err
 	}
@@ -174,7 +152,7 @@ func (a *App) Search(ctx context.Context, query, cursor string) (Listing, error)
 	if len(pg.Items) == 0 {
 		return Listing{}, fmt.Errorf("%w for %q", domain.ErrNoResults, query)
 	}
-	prog, err := a.progress()
+	prog, err := a.Store.Progress()
 	if err != nil {
 		return Listing{}, err
 	}
@@ -187,8 +165,8 @@ func finished(e domain.ListEntry) bool {
 	if e.Synced {
 		w = max(w, float64(e.AniDBWatched))
 	}
-	total := max(e.Anime.Episodes, e.AniDBTotal)
-	return total > 0 && w >= float64(total)
+	n := max(e.Anime.Episodes, e.AniDBTotal)
+	return n > 0 && w >= float64(n)
 }
 
 // sortList puts unfinished anime first, each group most recently watched first.
@@ -217,13 +195,7 @@ func (a *App) MyList(ctx context.Context) (Listing, error) {
 			avail[it.ID] = it.Available(a.Mode)
 		}
 	}
-	sort.SliceStable(list, func(i, j int) bool {
-		fi, fj := finished(list[i]), finished(list[j])
-		if fi != fj {
-			return !fi
-		}
-		return list[i].WatchedAt.After(list[j].WatchedAt)
-	})
+	sortList(list)
 	out := Listing{Entries: make([]Entry, len(list))}
 	for i, le := range list {
 		// AniDB lags the local log (its queue is rate limited): never show less
@@ -315,20 +287,13 @@ func (a *App) Hydrate(ctx context.Context, an domain.Anime) (domain.Anime, error
 		return an, err
 	}
 	an.CoverURL, an.Description = info.CoverURL, info.Description
-	an.Native = cmpOr(an.Native, info.Native)
-	an.Format, an.Status = cmpOr(an.Format, info.Format), cmpOr(an.Status, info.Status)
+	an.Native = cmp.Or(an.Native, info.Native)
+	an.Format, an.Status = cmp.Or(an.Format, info.Format), cmp.Or(an.Status, info.Status)
 	if an.Episodes == 0 {
 		an.Episodes = info.Episodes
 	}
 	_ = a.Store.RememberAnime(an)
 	return an, nil
-}
-
-func cmpOr(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
 
 // Detail is everything the detail view shows.

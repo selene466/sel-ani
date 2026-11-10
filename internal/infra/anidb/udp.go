@@ -39,6 +39,9 @@ const (
 	codeClientBanned      = 504
 	codeIllegalInput      = 505
 	codeInvalidSession    = 506
+	codeLoginNoUser       = 309
+	codeNoSuchUser        = 394
+	codeAccessDenied      = 509
 	codeBanned            = 555
 	codeUnknownCommand    = 598
 )
@@ -61,7 +64,6 @@ const sessionIdle = 30 * time.Minute
 // banPause: how long to stay silent after a ban reply.
 const banPause = 35 * time.Minute
 
-// Config holds the AniDB account and client registration.
 type Config struct {
 	Server        string // host:port, e.g. api.anidb.net:9000
 	LocalPort     int    // fixed local port, 0 = any (no session reuse across runs)
@@ -94,7 +96,6 @@ type PermanentError struct {
 
 func (e *PermanentError) Error() string { return fmt.Sprintf("AniDB: %d %s", e.Code, e.Text) }
 
-// Reply is a parsed UDP API reply.
 type Reply struct {
 	Code int
 	Text string   // rest of the first line
@@ -107,8 +108,8 @@ type UDP struct {
 
 	Cfg     Config
 	State   State
-	Gap     time.Duration // minimum time between packets; 0 = 4s
-	Timeout time.Duration // reply wait; 0 = 30s
+	Gap     time.Duration // minimum time between packets
+	Timeout time.Duration // reply wait
 
 	now   func() time.Time
 	sleep func(context.Context, time.Duration) error
@@ -119,22 +120,16 @@ type UDP struct {
 	key     []byte // AES-128 key while encryption is on
 	seq     int
 	tagBase string
+	buf     [2048]byte
 }
 
-func (u *UDP) clock() time.Time {
-	if u.now != nil {
-		return u.now()
-	}
-	return time.Now()
+// NewUDP returns a client with AniDB's pacing: one packet per 4s, and a 30s
+// reply wait because AniDB can take well over 15s under load.
+func NewUDP(cfg Config, state State) *UDP {
+	return &UDP{Cfg: cfg, State: state, Gap: 4 * time.Second, Timeout: 30 * time.Second, now: time.Now, sleep: sleep}
 }
 
-func (u *UDP) wait(ctx context.Context, d time.Duration) error {
-	if d <= 0 {
-		return nil
-	}
-	if u.sleep != nil {
-		return u.sleep(ctx, d)
-	}
+func sleep(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
@@ -143,21 +138,6 @@ func (u *UDP) wait(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
-}
-
-func (u *UDP) gap() time.Duration {
-	if u.Gap > 0 {
-		return u.Gap
-	}
-	return 4 * time.Second
-}
-
-func (u *UDP) timeout() time.Duration {
-	if u.Timeout > 0 {
-		return u.Timeout
-	}
-	// AniDB can take well over 15s to answer under load
-	return 30 * time.Second
 }
 
 // fingerprint identifies the credentials without storing the password.
@@ -175,8 +155,9 @@ func (u *UDP) kvInt(key string) int64 {
 	return n
 }
 
-// Close closes the socket. The session stays valid for the next run.
 func (u *UDP) Close() error {
+	u.callMu.Lock()
+	defer u.callMu.Unlock()
 	if u.conn == nil {
 		return nil
 	}
@@ -224,7 +205,7 @@ func (u *UDP) restore() {
 	}
 	used := time.Unix(u.kvInt(kvSessionUsed), 0)
 	auth, _, _ := u.State.Get(kvSessionAuth)
-	if u.clock().Sub(used) > sessionIdle || int(u.kvInt(kvSessionPort)) != u.port || auth != u.fingerprint() {
+	if u.now().Sub(used) > sessionIdle || int(u.kvInt(kvSessionPort)) != u.port || auth != u.fingerprint() {
 		u.forget()
 		return
 	}
@@ -244,9 +225,9 @@ func (u *UDP) forget() {
 // Call sends an authenticated command and returns its reply. It logs in
 // when needed and once more if the server lost the session.
 func (u *UDP) Call(ctx context.Context, cmd string, params ...string) (Reply, error) {
-	u.callMu.Lock() // the tracker's flush and my list refreshes share one session
+	u.callMu.Lock()
 	defer u.callMu.Unlock()
-	if until := u.kvInt(kvBannedUntil); until > u.clock().Unix() {
+	if until := u.kvInt(kvBannedUntil); until > u.now().Unix() {
 		return Reply{}, fmt.Errorf("%w until %s", ErrBanned, time.Unix(until, 0).Format("15:04"))
 	}
 	if v, ok, _ := u.State.Get(kvLoginBlocked); ok {
@@ -274,7 +255,7 @@ func (u *UDP) Call(ctx context.Context, cmd string, params ...string) (Reply, er
 			u.forget()
 			continue
 		}
-		u.State.Set(kvSessionUsed, strconv.FormatInt(u.clock().Unix(), 10))
+		u.State.Set(kvSessionUsed, strconv.FormatInt(u.now().Unix(), 10))
 		return r, nil
 	}
 }
@@ -319,7 +300,7 @@ func (u *UDP) login(ctx context.Context) error {
 	u.State.Set(kvSalt, salt)
 	u.State.Set(kvSessionPort, strconv.Itoa(u.port))
 	u.State.Set(kvSessionAuth, u.fingerprint())
-	u.State.Set(kvSessionUsed, strconv.FormatInt(u.clock().Unix(), 10))
+	u.State.Set(kvSessionUsed, strconv.FormatInt(u.now().Unix(), 10))
 	return nil
 }
 
@@ -329,11 +310,11 @@ func (u *UDP) login(ctx context.Context) error {
 func (u *UDP) refuse(r Reply) error {
 	err := &PermanentError{Code: r.Code, Text: r.Text}
 	switch r.Code {
-	case codeLoginFailed, codeClientOutdated, codeClientBanned, codeIllegalInput, 309, 394, 509:
+	case codeLoginFailed, codeClientOutdated, codeClientBanned, codeIllegalInput, codeLoginNoUser, codeNoSuchUser, codeAccessDenied:
 		u.State.Set(kvLoginBlocked, u.fingerprint()+"|"+err.Error())
 		return err
 	}
-	return fmt.Errorf("AniDB login: %d %s", r.Code, r.Text)
+	return replyErr(r)
 }
 
 // send writes one packet, honoring the gap to the previous one (also of
@@ -360,23 +341,24 @@ func (u *UDP) send(ctx context.Context, cmd string, params ...string) (Reply, er
 	}
 
 	last := time.Unix(0, u.kvInt(kvLastSend))
-	if err := u.wait(ctx, last.Add(u.gap()).Sub(u.clock())); err != nil {
-		return Reply{}, err
+	if d := last.Add(u.Gap).Sub(u.now()); d > 0 {
+		if err := u.sleep(ctx, d); err != nil {
+			return Reply{}, err
+		}
 	}
 	// record before sending: a crash right after must still count
-	u.State.Set(kvLastSend, strconv.FormatInt(u.clock().UnixNano(), 10))
+	u.State.Set(kvLastSend, strconv.FormatInt(u.now().UnixNano(), 10))
 	if _, err := u.conn.Write(pkt); err != nil {
 		return Reply{}, fmt.Errorf("AniDB: %w", err)
 	}
 
-	deadline := time.Now().Add(u.timeout())
+	deadline := u.now().Add(u.Timeout)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
-	buf := make([]byte, 64<<10)
 	for {
 		u.conn.SetReadDeadline(deadline)
-		n, err := u.conn.Read(buf)
+		n, err := u.conn.Read(u.buf[:])
 		if err != nil {
 			var ne net.Error
 			if errors.As(err, &ne) && ne.Timeout() {
@@ -387,7 +369,7 @@ func (u *UDP) send(ctx context.Context, cmd string, params ...string) (Reply, er
 			}
 			return Reply{}, fmt.Errorf("AniDB: %w", err)
 		}
-		data := buf[:n]
+		data := u.buf[:n]
 		if u.key != nil {
 			// errors such as 506 may come back unencrypted
 			if plain, err := decrypt(u.key, data); err == nil {
@@ -399,7 +381,7 @@ func (u *UDP) send(ctx context.Context, cmd string, params ...string) (Reply, er
 			continue // garbage or a late reply to an earlier packet
 		}
 		if r.Code == codeBanned {
-			until := u.clock().Add(banPause).Unix()
+			until := u.now().Add(banPause).Unix()
 			u.State.Set(kvBannedUntil, strconv.FormatInt(until, 10))
 			return r, fmt.Errorf("%w: %s", ErrBanned, strings.Join(r.Data, " "))
 		}
@@ -495,28 +477,27 @@ const stateRemote = "4"
 func (u *UDP) MarkWatched(ctx context.Context, aid, epno int, viewed time.Time) error {
 	ep := []string{"aid", strconv.Itoa(aid), "generic", "1", "epno", strconv.Itoa(epno)}
 	seen := []string{"viewed", "1", "viewdate", strconv.FormatInt(viewed.Unix(), 10)}
+	edit := func(params ...string) (Reply, bool, error) {
+		r, err := u.Call(ctx, "MYLISTADD", slices.Concat(params, []string{"edit", "1"}, seen)...)
+		return r, err == nil && r.Code == codeMylistEdited, err
+	}
 	r, err := u.Call(ctx, "MYLISTADD", slices.Concat(ep, []string{"state", stateRemote}, seen)...)
 	if err != nil {
 		return err
 	}
+	var done bool
 	switch r.Code {
+	case codeMylistEdited:
+		return nil
 	case codeMylistAdded:
 		// generic adds answer with the number of entries added; 0 means
 		// the episode is listed already, so the viewed flag was not set
 		if len(r.Data) == 0 || strings.TrimSpace(r.Data[0]) != "0" {
 			return nil
 		}
-		r, err = u.Call(ctx, "MYLISTADD", slices.Concat(ep, []string{"edit", "1"}, seen)...)
-		if err != nil {
-			return err
-		}
-		if r.Code == codeMylistEdited {
-			return nil
-		}
-	case codeMylistEdited:
-		return nil
+		r, done, err = edit(ep...)
 	case codeMylistExists:
-		// already listed: edit that entry by its lid, the first data field
+		// the first data field is the entry id
 		lid := ""
 		if len(r.Data) > 0 {
 			lid, _, _ = strings.Cut(r.Data[0], "|")
@@ -524,20 +505,19 @@ func (u *UDP) MarkWatched(ctx context.Context, aid, epno int, viewed time.Time) 
 		if n, err := strconv.Atoi(lid); err != nil || n <= 0 {
 			return &PermanentError{Code: r.Code, Text: "already in MyList, no entry id in reply"}
 		}
-		r, err = u.Call(ctx, "MYLISTADD", append([]string{"lid", lid, "edit", "1"}, seen...)...)
-		if err != nil {
-			return err
-		}
-		if r.Code == codeMylistEdited {
-			return nil
-		}
+		r, done, err = edit("lid", lid)
+	}
+	if err != nil || done {
+		return err
 	}
 	switch r.Code {
 	case codeNoSuchFile, codeNoSuchAnime, codeNoSuchGroup, codeNoSuchEntry, codeIllegalInput, codeUnknownCommand:
 		return &PermanentError{Code: r.Code, Text: r.Text}
 	}
-	return fmt.Errorf("AniDB: %d %s", r.Code, r.Text)
+	return replyErr(r)
 }
+
+func replyErr(r Reply) error { return fmt.Errorf("AniDB: %d %s", r.Code, r.Text) }
 
 // MyListProgress returns how many episodes of aid AniDB marks watched, and
 // how many episodes the anime has when the reply says. An anime not in
@@ -585,7 +565,7 @@ func (u *UDP) MyListProgress(ctx context.Context, aid int) (watched, total int, 
 	case codeNoSuchAnime, codeIllegalInput, codeUnknownCommand:
 		return 0, 0, &PermanentError{Code: r.Code, Text: r.Text}
 	}
-	return 0, 0, fmt.Errorf("AniDB: unrecognised MYLIST reply %d %s", r.Code, r.Text)
+	return 0, 0, fmt.Errorf("unrecognised MYLIST reply: %w", replyErr(r))
 }
 
 // countEpisodes counts the episodes of a set such as "1-3,5". Specials

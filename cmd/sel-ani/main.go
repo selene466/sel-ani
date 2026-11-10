@@ -176,13 +176,10 @@ func newTracker(db *store.DB, c config.AniDB) *anidb.Tracker {
 	return &anidb.Tracker{
 		Store:  db,
 		Titles: &anidb.Titles{Store: db, UserAgent: config.AppName + "/" + version},
-		UDP: &anidb.UDP{
-			Cfg: anidb.Config{
-				Server: c.Server, LocalPort: c.LocalPort,
-				Client: c.Client, ClientVersion: c.ClientVersion,
-				Username: c.Username, Password: c.Password, APIKey: c.APIKey,
-			},
-			State: db,
-		},
+		UDP: anidb.NewUDP(anidb.Config{
+			Server: c.Server, LocalPort: c.LocalPort,
+			Client: c.Client, ClientVersion: c.ClientVersion,
+			Username: c.Username, Password: c.Password, APIKey: c.APIKey,
+		}, db),
 	}
 }
