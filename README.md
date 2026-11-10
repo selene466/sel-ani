@@ -33,8 +33,14 @@ Writes `./dist/sel-ani`.
 ```
 sel-ani
 sel-ani --config path/to/config.toml
+sel-ani --dmenu
+sel-ani --rofi
 sel-ani --version
 ```
+
+### dmenu and rofi
+
+`--dmenu` and `--rofi` skip the TUI and run as a menu.
 
 ## Configuration
 

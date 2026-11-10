@@ -41,7 +41,12 @@ func main() {
 func run() error {
 	cfgPath := flag.String("config", "", "load this config file instead of the default one")
 	showVersion := flag.Bool("version", false, "print the version and exit")
+	useDmenu := flag.Bool("dmenu", false, "pick title and episode with dmenu")
+	useRofi := flag.Bool("rofi", false, "pick title and episode with rofi, with covers")
 	flag.Parse()
+	if *useDmenu && *useRofi {
+		return errors.New("use only one of --dmenu and --rofi")
+	}
 	if *showVersion {
 		fmt.Println("sel-ani", version)
 		return nil
@@ -128,6 +133,11 @@ func run() error {
 	}
 	if err := apply(cfg); err != nil {
 		return err
+	}
+
+	if *useDmenu || *useRofi {
+		a.Warn = func(s string) { fmt.Fprintln(os.Stderr, "sel-ani:", s) }
+		return runMenu(ctx, a, &image.Source{Fetcher: fetcher, Cache: db}, *useRofi)
 	}
 
 	supported := kitty.Supported(os.Getenv)
