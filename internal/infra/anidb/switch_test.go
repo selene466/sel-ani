@@ -17,7 +17,7 @@ func TestSwitchOffDoesNothing(t *testing.T) {
 	if err := s.Watched(context.Background(), domain.Anime{ID: "x"}, "1"); err != nil {
 		t.Errorf("watched while off: %v", err)
 	}
-	if _, _, err := s.MyListProgress(context.Background(), 1); !errors.Is(err, domain.ErrDisabled) {
+	if _, _, _, err := s.MyListProgress(context.Background(), 1); !errors.Is(err, domain.ErrDisabled) {
 		t.Errorf("progress while off: %v", err)
 	}
 	if got := s.Close(time.Second); got != "" {

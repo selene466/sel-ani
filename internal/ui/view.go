@@ -125,6 +125,9 @@ func (m *Model) renderBottom(w int) string {
 	if m.home {
 		return m.st.muted.Render(m.pad(" j/k move  enter select  1 2 section  / search  m sub/dub  q quit  (mouse: left column exit, right column enter)", w))
 	}
+	if m.level == levelEpisodes {
+		return m.st.muted.Render(m.pad(" j/k move  l play  space mark watched  h back  q quit", w))
+	}
 	help := " j/k move  l open  h back  / filter  tab section  s sort  r refresh  m sub/dub  q quit  (mouse: left column back, right column open)"
 	return m.st.muted.Render(m.pad(help, w))
 }

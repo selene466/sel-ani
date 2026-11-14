@@ -5,6 +5,13 @@ A vibecoding slopp for my personal use.
 Terminal UI to browse, search and play from Miruro.  
 Tracks watch history locally and can sync list with AniDB.
 
+![sel-ani](screenshots/01.png)  
+![My List](screenshots/02.png)  
+![Latest](screenshots/03.png)  
+![Episode](screenshots/04.png)  
+![Settings 1](screenshots/05.png)  
+![Settings 2](screenshots/06.png)
+
 ## Install
 
 With [mise](https://mise.jdx.dev):

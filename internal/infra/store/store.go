@@ -108,6 +108,7 @@ CREATE TABLE mylist (
 	fetched_at INTEGER NOT NULL
 );
 `,
+	`ALTER TABLE mylist ADD COLUMN episodes TEXT; -- watched episodes, comma separated; NULL = unknown`,
 }
 
 // Open opens or creates the database at path. The file is private (0600):
@@ -605,7 +606,8 @@ func (d *DB) MyList() ([]domain.ListEntry, error) {
 		SELECT a.anime_id, a.title, a.alt_title, COALESCE(a.total_episodes, 0), a.native, a.cover_url,
 		       a.description, a.format, a.status, a.aid,
 		       COALESCE(w.episode, ''), COALESCE(w.watched_at, 0),
-		       m.aid IS NOT NULL, COALESCE(m.watched, 0), COALESCE(m.total, 0), COALESCE(m.fetched_at, 0)
+		       m.aid IS NOT NULL, COALESCE(m.watched, 0), COALESCE(m.total, 0), COALESCE(m.fetched_at, 0),
+		       m.episodes, COALESCE((SELECT group_concat(episode) FROM watch_log l WHERE l.anime_id = a.anime_id), '')
 		FROM anime a
 		LEFT JOIN watch w USING (anime_id)
 		LEFT JOIN mylist m ON m.aid = a.aid
@@ -619,9 +621,11 @@ func (d *DB) MyList() ([]domain.ListEntry, error) {
 	for rows.Next() {
 		var e domain.ListEntry
 		var at, synced int64
+		var eps sql.NullString
+		var seen string
 		a := &e.Anime
 		if err := rows.Scan(&a.ID, &a.Title, &a.AltTitle, &a.Episodes, &a.Native, &a.CoverURL, &a.Description,
-			&a.Format, &a.Status, &e.AID, &e.Watched, &at, &e.Synced, &e.AniDBWatched, &e.AniDBTotal, &synced); err != nil {
+			&a.Format, &a.Status, &e.AID, &e.Watched, &at, &e.Synced, &e.AniDBWatched, &e.AniDBTotal, &synced, &eps, &seen); err != nil {
 			return nil, err
 		}
 		if at > 0 {
@@ -630,17 +634,58 @@ func (d *DB) MyList() ([]domain.ListEntry, error) {
 		if synced > 0 {
 			e.SyncedAt = time.Unix(synced, 0)
 		}
+		if eps.Valid {
+			e.AniDBEps = splitInts(eps.String)
+		}
+		if seen != "" {
+			e.Seen = strings.Split(seen, ",")
+		}
 		out = append(out, e)
 	}
 	return out, rows.Err()
 }
 
-func (d *DB) PutMyList(aid, watched, total int) error {
+// PutMyList stores what AniDB answered. eps nil with watched > 0 means the
+// set of episodes is unknown.
+func (d *DB) PutMyList(aid, watched, total int, eps []int) error {
+	var list any // NULL: unknown
+	if eps != nil || watched == 0 {
+		parts := make([]string, len(eps))
+		for i, n := range eps {
+			parts[i] = strconv.Itoa(n)
+		}
+		list = strings.Join(parts, ",")
+	}
 	_, err := d.db.Exec(`
-		INSERT INTO mylist (aid, watched, total, fetched_at) VALUES (?, ?, ?, ?)
-		ON CONFLICT (aid) DO UPDATE SET watched = excluded.watched, total = excluded.total, fetched_at = excluded.fetched_at`,
-		aid, watched, total, d.unix())
+		INSERT INTO mylist (aid, watched, total, fetched_at, episodes) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT (aid) DO UPDATE SET watched = excluded.watched, total = excluded.total,
+			fetched_at = excluded.fetched_at, episodes = excluded.episodes`,
+		aid, watched, total, d.unix(), list)
 	return err
+}
+
+// MyListEpisodes returns the episodes AniDB marks watched for an anime, as
+// last fetched. known is false when AniDB was not asked or gave no list.
+func (d *DB) MyListEpisodes(animeID string) (eps []int, known bool, err error) {
+	var s sql.NullString
+	err = d.db.QueryRow(`SELECT m.episodes FROM anime a JOIN mylist m ON m.aid = a.aid WHERE a.anime_id = ?`, animeID).Scan(&s)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil || !s.Valid {
+		return nil, false, err
+	}
+	return splitInts(s.String), true, nil
+}
+
+func splitInts(s string) []int {
+	var out []int
+	for _, p := range strings.Split(s, ",") {
+		if n, err := strconv.Atoi(p); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // ImageGet returns a stored cover and marks it as used now.

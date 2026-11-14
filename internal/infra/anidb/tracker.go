@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -189,6 +190,9 @@ func (t *Tracker) run(ctx context.Context, done chan struct{}) {
 		return
 	}
 	defer t.Store.Release(leaseName, t.owner)
+	// what AniDB already lists per anime, asked once per run before anything
+	// is sent for it: AniDB's list wins, a local watch never overwrites it
+	remote := map[int][]int{}
 	for ctx.Err() == nil {
 		items, err := t.Store.DueOutbox(batch)
 		if err != nil || len(items) == 0 {
@@ -201,7 +205,14 @@ func (t *Tracker) run(ctx context.Context, done chan struct{}) {
 			if ok, _ := t.Store.Acquire(leaseName, t.owner, leaseTTL); !ok {
 				return
 			}
-			err := t.send(ctx, it)
+			err := t.pull(ctx, it.AID, remote)
+			if err == nil && slices.Contains(remote[it.AID], it.EpNo) {
+				t.Store.OutboxDone(it.ID) // AniDB has it: nothing to send
+				continue
+			}
+			if err == nil {
+				err = t.send(ctx, it)
+			}
 			var pe *PermanentError
 			switch {
 			case err == nil:
@@ -225,16 +236,47 @@ func (t *Tracker) run(ctx context.Context, done chan struct{}) {
 	}
 }
 
+// pull asks AniDB which episodes of aid are watched, once per run, and keeps
+// the answer in the local store. A permanent answer (no such anime) is not
+// an error here: sending reports it. An unknown set is not a reason to
+// hold back: the send itself does not touch an entry AniDB has viewed.
+func (t *Tracker) pull(ctx context.Context, aid int, got map[int][]int) error {
+	if _, ok := got[aid]; ok {
+		return nil
+	}
+	var w, total int
+	var eps []int
+	err := t.retry(ctx, func() (err error) {
+		w, total, eps, err = t.UDP.MyListProgress(ctx, aid)
+		return err
+	})
+	var pe *PermanentError
+	if errors.As(err, &pe) {
+		got[aid] = nil
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	got[aid] = eps
+	return t.Store.PutMyList(aid, w, total, eps)
+}
+
 // send marks one item watched, resending after lost replies. A resend of
 // an add that did arrive is harmless: AniDB answers "already listed" and
 // the entry is edited instead.
 func (t *Tracker) send(ctx context.Context, it store.OutboxItem) error {
+	return t.retry(ctx, func() error { return t.UDP.MarkWatched(ctx, it.AID, it.EpNo, it.ViewedAt) })
+}
+
+// retry runs call again after a lost reply, up to noReplyTries times.
+func (t *Tracker) retry(ctx context.Context, call func() error) error {
 	pause := t.RetryPause
 	if pause <= 0 {
 		pause = 30 * time.Second
 	}
 	for try := 1; ; try++ {
-		err := t.UDP.MarkWatched(ctx, it.AID, it.EpNo, it.ViewedAt)
+		err := call()
 		if !errors.Is(err, ErrNoReply) || try >= noReplyTries {
 			return err
 		}

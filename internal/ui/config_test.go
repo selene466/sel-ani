@@ -605,7 +605,7 @@ func TestEnablingAniDBRefreshesTheList(t *testing.T) {
 
 type countingSync struct{ n *int }
 
-func (c countingSync) MyListProgress(context.Context, int) (int, int, error) {
+func (c countingSync) MyListProgress(context.Context, int) (int, int, []int, error) {
 	*c.n++
-	return 0, 0, nil
+	return 0, 0, nil, nil
 }

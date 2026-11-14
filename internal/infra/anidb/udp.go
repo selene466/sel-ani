@@ -507,7 +507,14 @@ func (u *UDP) MarkWatched(ctx context.Context, aid, epno int, viewed time.Time) 
 		// the first data field is the entry id
 		lid := ""
 		if len(r.Data) > 0 {
-			lid, _, _ = strings.Cut(r.Data[0], "|")
+			f := strings.Split(r.Data[0], "|")
+			lid = f[0]
+			// AniDB has it watched already: keep its viewdate
+			if len(f) > 7 {
+				if v, err := strconv.Atoi(strings.TrimSpace(f[7])); err == nil && v > 0 {
+					return nil
+				}
+			}
 		}
 		if n, err := strconv.Atoi(lid); err != nil || n <= 0 {
 			return &PermanentError{Code: r.Code, Text: "already in MyList, no entry id in reply"}
@@ -526,23 +533,25 @@ func (u *UDP) MarkWatched(ctx context.Context, aid, epno int, viewed time.Time) 
 
 func replyErr(r Reply) error { return fmt.Errorf("AniDB: %d %s", r.Code, r.Text) }
 
-// MyListProgress returns how many episodes of aid AniDB marks watched, and
-// how many episodes the anime has when the reply says. An anime not in
-// MyList is 0, 0.
+// MyListProgress returns how many episodes of aid AniDB marks watched, how
+// many episodes the anime has when the reply says, and which ones when the
+// reply lists them. An anime not in MyList is 0, 0. eps is nil when the set
+// is unknown, i.e. a reply about a single entry (it has an episode id, not
+// a number).
 //
 // MYLIST aid=N answers 221 with one entry (lid|fid|eid|aid|gid|date|state|
 // viewdate|...) or 312 with a summary of many (title|episodes|unknown|hdd|
 // cd|deleted|watched episodes|...), where the watched episodes are a set
 // like "1-3,5". A reply in neither shape is an error, not a guess: the
 // caller keeps showing local progress.
-func (u *UDP) MyListProgress(ctx context.Context, aid int) (watched, total int, err error) {
+func (u *UDP) MyListProgress(ctx context.Context, aid int) (watched, total int, eps []int, err error) {
 	r, err := u.Call(ctx, "MYLIST", "aid", strconv.Itoa(aid))
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
 	switch r.Code {
 	case codeNoSuchEntry, codeNoSuchMylistEntry:
-		return 0, 0, nil
+		return 0, 0, nil, nil
 	case codeMylist:
 		if len(r.Data) == 0 {
 			break
@@ -552,9 +561,9 @@ func (u *UDP) MyListProgress(ctx context.Context, aid int) (watched, total int, 
 			break
 		}
 		if n, err := strconv.Atoi(strings.TrimSpace(f[7])); err == nil && n > 0 {
-			return 1, 0, nil
+			return 1, 0, nil, nil
 		}
-		return 0, 0, nil
+		return 0, 0, nil, nil
 	case codeMylistMultiple:
 		if len(r.Data) == 0 {
 			break
@@ -563,48 +572,50 @@ func (u *UDP) MyListProgress(ctx context.Context, aid int) (watched, total int, 
 		if len(f) < 7 {
 			break
 		}
-		n, ok := countEpisodes(f[6])
+		eps, ok := parseEpisodes(f[6])
 		if !ok {
 			break
 		}
 		total, _ = strconv.Atoi(strings.TrimSpace(f[1]))
-		return n, total, nil
+		return len(eps), total, eps, nil
 	case codeNoSuchAnime, codeIllegalInput, codeUnknownCommand:
-		return 0, 0, &PermanentError{Code: r.Code, Text: r.Text}
+		return 0, 0, nil, &PermanentError{Code: r.Code, Text: r.Text}
 	}
-	return 0, 0, fmt.Errorf("unrecognised MYLIST reply: %w", replyErr(r))
+	return 0, 0, nil, fmt.Errorf("unrecognised MYLIST reply: %w", replyErr(r))
 }
 
-// countEpisodes counts the episodes of a set such as "1-3,5". Specials
-// (S1, C2, ...) are not counted. ok is false when s is not such a set.
-func countEpisodes(s string) (n int, ok bool) {
+// parseEpisodes lists the episodes of a set such as "1-3,5". Specials
+// (S1, C2, ...) are skipped. ok is false when s is not such a set.
+func parseEpisodes(s string) (eps []int, ok bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return 0, true
+		return nil, true
 	}
 	for _, part := range strings.Split(s, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
-			return 0, false
+			return nil, false
 		}
 		if part[0] < '0' || part[0] > '9' {
 			if strings.ContainsAny(part[:1], "SCTPO") && len(part) > 1 {
 				continue // special, credit, trailer, parody, other
 			}
-			return 0, false
+			return nil, false
 		}
 		lo, hi, isRange := strings.Cut(part, "-")
 		a, err := strconv.Atoi(lo)
 		if err != nil {
-			return 0, false
+			return nil, false
 		}
 		b := a
 		if isRange {
-			if b, err = strconv.Atoi(hi); err != nil || b < a {
-				return 0, false
+			if b, err = strconv.Atoi(hi); err != nil || b < a || b-a > 10000 {
+				return nil, false
 			}
 		}
-		n += b - a + 1
+		for n := a; n <= b; n++ {
+			eps = append(eps, n)
+		}
 	}
-	return n, true
+	return eps, true
 }

@@ -144,7 +144,12 @@ type (
 		url string
 		st  coverState
 	}
-	sentMsg   struct{ id uint32 }
+	sentMsg      struct{ id uint32 }
+	refreshedMsg struct{ err error }
+	markedMsg    struct {
+		title string
+		err   error
+	}
 	playedMsg struct {
 		title string
 		err   error
@@ -396,6 +401,16 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		m.pngs[msg.url] = msg.st
 	case sentMsg:
 		m.sent[msg.id] = true
+	case markedMsg:
+		if msg.err != nil {
+			return m.say(msg.err.Error(), true)
+		}
+		m.keep = m.cursor
+		cmds := []tea.Cmd{m.load(), m.say("marked "+msg.title+" watched", false)}
+		if e, ok := m.selected(); ok && m.level == levelEpisodes {
+			cmds = append(cmds, m.loadDetail(e.Anime))
+		}
+		return tea.Batch(cmds...)
 	case playedMsg:
 		if msg.err != nil {
 			return m.say(msg.err.Error(), true)
@@ -413,6 +428,12 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		} else if msg.sync {
 			return m.sync()
 		}
+	case refreshedMsg:
+		cmds := []tea.Cmd{m.load()}
+		if msg.err != nil {
+			cmds = append(cmds, m.say("anidb: "+msg.err.Error(), true))
+		}
+		return tea.Batch(cmds...)
 	case syncedMsg:
 		if msg.err != nil {
 			return m.say("anidb: "+msg.err.Error(), true)
@@ -541,6 +562,11 @@ func (m *Model) key(k tea.KeyPressMsg) tea.Cmd {
 			m.keep = m.cursor
 			return m.loadWith(true)
 		}
+		if m.sec == secMyList && !m.loading && m.opts.App.Sync != nil {
+			m.keep, m.loading = m.cursor, true
+			a, ctx := m.opts.App, m.ctx
+			return func() tea.Msg { return refreshedMsg{err: a.RefreshMyList(ctx)} }
+		}
 	case "h", "left", "esc", "backspace":
 		return m.back()
 	case "j", "down":
@@ -583,6 +609,8 @@ func (m *Model) episodeKey(s string) tea.Cmd {
 		m.epCursor = max(m.epCursor-m.bodyHeight()/2, 0)
 	case "l", "right", "enter":
 		return m.playSelected()
+	case "space":
+		return m.markSelected()
 	}
 	return nil
 }
@@ -962,6 +990,18 @@ func (m *Model) playSelected() tea.Cmd {
 	}
 	ep := m.detail.Episodes[m.epCursor]
 	return tea.Batch(m.play(e.Anime, ep), m.say("starting episode "+ep.Number+"...", false))
+}
+
+// markSelected marks the highlighted episode watched without playing it.
+func (m *Model) markSelected() tea.Cmd {
+	e, ok := m.selected()
+	if !ok || m.detail == nil || len(m.detail.Episodes) == 0 {
+		return nil
+	}
+	ep := m.detail.Episodes[m.epCursor]
+	a, ctx, an := m.opts.App, m.ctx, e.Anime
+	title := an.Name() + " " + ep.Number
+	return func() tea.Msg { return markedMsg{title: title, err: a.MarkWatched(ctx, an, ep)} }
 }
 
 // updateAnime replaces the listed copy of an anime with a fuller one.

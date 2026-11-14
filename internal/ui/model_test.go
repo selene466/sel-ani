@@ -65,9 +65,10 @@ func (s *fakeStore) RememberAnime(domain.Anime) error { return nil }
 func (s *fakeStore) MyList() ([]domain.ListEntry, error) {
 	return []domain.ListEntry{{AID: 1, Anime: domain.Anime{ID: "l1", Title: "Listed", Episodes: 12}, Watched: "3"}}, nil
 }
-func (s *fakeStore) PutMyList(int, int, int) error    { return nil }
-func (s *fakeStore) Get(string) (string, bool, error) { return "", false, nil }
-func (s *fakeStore) Set(string, string) error         { return nil }
+func (s *fakeStore) PutMyList(int, int, int, []int) error       { return nil }
+func (s *fakeStore) MyListEpisodes(string) ([]int, bool, error) { return nil, false, nil }
+func (s *fakeStore) Get(string) (string, bool, error)           { return "", false, nil }
+func (s *fakeStore) Set(string, string) error                   { return nil }
 
 type fakePlayer struct{ played []domain.Media }
 
@@ -173,6 +174,16 @@ func keyMsg(s string) tea.KeyPressMsg {
 }
 
 func (h *harness) screen() string { return ansi.Strip(h.m.render()) }
+
+func TestSpaceMarksEpisodeWatchedWithoutPlaying(t *testing.T) {
+	h := newHarness(t, false)
+	h.key("enter")
+	h.key("j")
+	h.send(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
+	if len(h.pl.played) != 0 || len(h.st.saved) != 1 || h.st.saved[0].Episode != "2" {
+		t.Fatalf("played %+v saved %+v", h.pl.played, h.st.saved)
+	}
+}
 
 func TestOpenEpisodesAndPlay(t *testing.T) {
 	h := newHarness(t, false)

@@ -37,14 +37,15 @@ type Store interface {
 	WatchedEpisodes(animeID string) ([]string, error)
 	RememberAnime(domain.Anime) error
 	MyList() ([]domain.ListEntry, error)
-	PutMyList(aid, watched, total int) error
+	PutMyList(aid, watched, total int, eps []int) error
+	MyListEpisodes(animeID string) (eps []int, known bool, err error)
 	Get(key string) (string, bool, error)
 	Set(key, value string) error
 }
 
 // Syncer reads an anime's progress from AniDB's MyList.
 type Syncer interface {
-	MyListProgress(ctx context.Context, aid int) (watched, total int, err error)
+	MyListProgress(ctx context.Context, aid int) (watched, total int, eps []int, err error)
 }
 
 // App wires the ports together. Mode and Quality may change at runtime.
@@ -184,13 +185,38 @@ func (a *App) Search(ctx context.Context, query, cursor string) (Listing, error)
 	return Listing{Entries: a.entries(pg.Items, prog, false), Next: pg.Next}, nil
 }
 
+// merged combines the episodes watched locally with the ones AniDB lists:
+// AniDB's set is the base, local episodes only add to it, so an episode
+// watched in both counts once. ok is false when AniDB's set is unknown.
+func merged(e domain.ListEntry) (count int, last float64, ok bool) {
+	if !e.Synced || (e.AniDBEps == nil && e.AniDBWatched > 0) {
+		return 0, 0, false
+	}
+	set := map[int]bool{}
+	for _, n := range e.AniDBEps {
+		set[n] = true
+	}
+	for _, s := range e.Seen {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			set[n] = true
+		}
+	}
+	for n := range set {
+		last = max(last, float64(n))
+	}
+	return len(set), last, true
+}
+
 // finished reports whether every episode of e is watched.
 func finished(e domain.ListEntry) bool {
+	n := max(e.Anime.Episodes, e.AniDBTotal)
+	if count, _, ok := merged(e); ok {
+		return n > 0 && count >= n
+	}
 	w, _ := num(e.Watched)
 	if e.Synced {
 		w = max(w, float64(e.AniDBWatched))
 	}
-	n := max(e.Anime.Episodes, e.AniDBTotal)
 	return n > 0 && w >= float64(n)
 }
 
@@ -227,17 +253,27 @@ func (a *App) MyList(ctx context.Context) (Listing, error) {
 		// AniDB lags the local log (its queue is rate limited): never show less
 		// than what was watched here
 		watched, tot := le.Watched, le.Anime.Episodes
+		last := watched // highest episode watched: what [N] compares with
 		if le.Synced {
-			if lw, _ := num(watched); float64(le.AniDBWatched) > lw {
-				watched = strconv.Itoa(le.AniDBWatched)
-			}
 			tot = max(le.AniDBTotal, tot)
+			if count, hi, ok := merged(le); ok {
+				watched, last = strconv.Itoa(count), strconv.FormatFloat(hi, 'f', -1, 64)
+				if lw, _ := num(le.Watched); lw > hi {
+					last = le.Watched // a fractional episode may be the latest
+				}
+			} else if lw, _ := num(watched); float64(le.AniDBWatched) > lw {
+				watched = strconv.Itoa(le.AniDBWatched)
+				last = watched
+			}
 		}
 		if watched == "" {
 			watched = "0"
 		}
+		if last == "" {
+			last = "0"
+		}
 		e := Entry{Anime: le.Anime, Watched: le.Watched, InList: true}
-		e.New = isNew(avail[le.Anime.ID], watched)
+		e.New = isNew(avail[le.Anime.ID], last)
 		e.Counter = tag(e.New, watched+"/"+total(tot))
 		out.Entries[i] = e
 	}
@@ -250,7 +286,13 @@ func (a *App) MyList(ctx context.Context) (Listing, error) {
 // asks about SyncBatch anime at most (unfinished, most recently watched
 // first). The syncer rate limits, so this may take a while: run it in the
 // background.
-func (a *App) SyncMyList(ctx context.Context) error {
+func (a *App) SyncMyList(ctx context.Context) error { return a.syncMyList(ctx, false) }
+
+// RefreshMyList is SyncMyList for an explicit refresh: stored answers are
+// asked again whatever their age or earlier failures.
+func (a *App) RefreshMyList(ctx context.Context) error { return a.syncMyList(ctx, true) }
+
+func (a *App) syncMyList(ctx context.Context, force bool) error {
 	if a.Sync == nil {
 		return nil
 	}
@@ -262,14 +304,14 @@ func (a *App) SyncMyList(ctx context.Context) error {
 	var errs []error
 	asked := 0
 	for _, e := range list {
-		if finished(e) || (e.Synced && time.Since(e.SyncedAt) < SyncAge) || a.failedRecently(e.AID) {
+		if finished(e) || (!force && ((e.Synced && time.Since(e.SyncedAt) < SyncAge) || a.failedRecently(e.AID))) {
 			continue
 		}
 		if asked == SyncBatch {
 			break
 		}
 		asked++
-		w, t, err := a.Sync.MyListProgress(ctx, e.AID)
+		w, t, eps, err := a.Sync.MyListProgress(ctx, e.AID)
 		if errors.Is(err, domain.ErrDisabled) {
 			return nil // AniDB is off: nothing to refresh
 		}
@@ -281,7 +323,7 @@ func (a *App) SyncMyList(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("%s: %w", e.Anime.Name(), err))
 			continue
 		}
-		if err := a.Store.PutMyList(e.AID, w, t); err != nil {
+		if err := a.Store.PutMyList(e.AID, w, t, eps); err != nil {
 			return err
 		}
 	}
@@ -341,6 +383,12 @@ func (a *App) Detail(ctx context.Context, an domain.Anime) (Detail, error) {
 		return Detail{}, err
 	}
 	d := Detail{Anime: an, Episodes: eps, Watched: map[string]bool{}}
+	// AniDB's list is the base, the local log only adds to it
+	if remote, _, err := a.Store.MyListEpisodes(an.ID); err == nil {
+		for _, n := range remote {
+			seen = append(seen, strconv.Itoa(n))
+		}
+	}
 	last := ""
 	for _, s := range seen {
 		d.Watched[s] = true
@@ -393,14 +441,29 @@ func (a *App) Play(ctx context.Context, an domain.Anime, ep domain.Episode) erro
 			return err
 		}
 	}
-	_ = a.Store.RememberAnime(an)
-	if err := a.Store.Save(domain.HistoryEntry{Episode: ep.Number, AnimeID: an.ID, Title: an.Title, AltTitle: an.AltTitle, Total: an.Episodes}); err != nil {
-		a.warn("history: " + err.Error())
-	}
+	a.record(ctx, an, ep.Number)
+	return nil
+}
+
+// MarkWatched records ep as watched without playing it, locally and on AniDB.
+func (a *App) MarkWatched(ctx context.Context, an domain.Anime, ep domain.Episode) error {
 	if a.Tracker != nil {
-		if err := a.Tracker.Watched(ctx, an, ep.Number); err != nil {
+		if err := a.Tracker.Resolve(ctx, an); err != nil {
 			a.warn("tracking: " + err.Error())
 		}
 	}
+	a.record(ctx, an, ep.Number)
 	return nil
+}
+
+func (a *App) record(ctx context.Context, an domain.Anime, ep string) {
+	_ = a.Store.RememberAnime(an)
+	if err := a.Store.Save(domain.HistoryEntry{Episode: ep, AnimeID: an.ID, Title: an.Title, AltTitle: an.AltTitle, Total: an.Episodes}); err != nil {
+		a.warn("history: " + err.Error())
+	}
+	if a.Tracker != nil {
+		if err := a.Tracker.Watched(ctx, an, ep); err != nil {
+			a.warn("tracking: " + err.Error())
+		}
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -354,7 +355,7 @@ func TestMyListAndAnimeMeta(t *testing.T) {
 	}
 	d.SetAID("x", 42, "auto")
 	d.Save(domain.HistoryEntry{AnimeID: "x", Title: "Eng", Episode: "3"})
-	d.PutMyList(42, 3, 12)
+	d.PutMyList(42, 3, 12, []int{1, 2, 5})
 	l, err := d.MyList()
 	if err != nil || len(l) != 1 {
 		t.Fatalf("%+v %v", l, err)
@@ -362,6 +363,17 @@ func TestMyListAndAnimeMeta(t *testing.T) {
 	e := l[0]
 	if e.AID != 42 || e.Watched != "3" || !e.Synced || e.AniDBWatched != 3 || e.AniDBTotal != 12 || e.Anime.Native != "JP" {
 		t.Errorf("%+v", e)
+	}
+	if !slices.Equal(e.AniDBEps, []int{1, 2, 5}) || !slices.Equal(e.Seen, []string{"3"}) {
+		t.Errorf("sets: %v %v", e.AniDBEps, e.Seen)
+	}
+	if eps, known, err := d.MyListEpisodes("x"); err != nil || !known || !slices.Equal(eps, []int{1, 2, 5}) {
+		t.Errorf("MyListEpisodes %v %v %v", eps, known, err)
+	}
+	// a reply without a list leaves the set unknown, not empty
+	d.PutMyList(42, 1, 0, nil)
+	if _, known, _ := d.MyListEpisodes("x"); known {
+		t.Error("set of a single-entry reply must stay unknown")
 	}
 }
 

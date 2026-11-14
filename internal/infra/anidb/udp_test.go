@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -407,33 +408,56 @@ func TestMyListProgress(t *testing.T) {
 	for _, c := range []struct {
 		reply          string
 		watched, total int
+		eps            []int
 		fail           bool
 	}{
-		{"312 MULTIPLE MYLIST ENTRIES\nFrieren|28|0|5|0|0|1-3,5,S1|x", 4, 28, false},
-		{"221 MYLIST\n1|2|3|4|5|1700000000|1|1700000500|0|0||0", 1, 0, false},
-		{"221 MYLIST\n1|2|3|4|5|1700000000|1|0|0|0||0", 0, 0, false},
-		{"411 NO SUCH MYLIST ENTRY", 0, 0, false},
-		{"321 NO SUCH ENTRY", 0, 0, false},
-		{"312 MULTIPLE MYLIST ENTRIES\nFrieren|28|garbage", 0, 0, true},
-		{"330 NO SUCH ANIME", 0, 0, true},
+		{"312 MULTIPLE MYLIST ENTRIES\nFrieren|28|0|5|0|0|1-3,5,S1|x", 4, 28, []int{1, 2, 3, 5}, false},
+		{"221 MYLIST\n1|2|3|4|5|1700000000|1|1700000500|0|0||0", 1, 0, nil, false},
+		{"221 MYLIST\n1|2|3|4|5|1700000000|1|0|0|0||0", 0, 0, nil, false},
+		{"411 NO SUCH MYLIST ENTRY", 0, 0, nil, false},
+		{"321 NO SUCH ENTRY", 0, 0, nil, false},
+		{"312 MULTIPLE MYLIST ENTRIES\nFrieren|28|garbage", 0, 0, nil, true},
+		{"330 NO SUCH ANIME", 0, 0, nil, true},
 	} {
 		srv.with(func() { srv.reply["MYLIST"] = c.reply })
-		w, tot, err := u.MyListProgress(ctx, 17617)
-		if (err != nil) != c.fail || w != c.watched || tot != c.total {
-			t.Errorf("%q: %d %d %v", c.reply, w, tot, err)
+		w, tot, eps, err := u.MyListProgress(ctx, 17617)
+		if (err != nil) != c.fail || w != c.watched || tot != c.total || !slices.Equal(eps, c.eps) {
+			t.Errorf("%q: %d %d %v %v", c.reply, w, tot, eps, err)
 		}
 	}
 }
 
-func TestCountEpisodes(t *testing.T) {
-	for in, want := range map[string]int{"": 0, "1": 1, "1-3": 3, "1-3,5,7-8": 6, "S1,S2": 0, "1,S3": 1} {
-		if n, ok := countEpisodes(in); !ok || n != want {
-			t.Errorf("%q: %d %v", in, n, ok)
+func TestParseEpisodes(t *testing.T) {
+	for in, want := range map[string][]int{"": nil, "1": {1}, "1-3": {1, 2, 3}, "1-3,5,7-8": {1, 2, 3, 5, 7, 8}, "S1,S2": nil, "1,S3": {1}} {
+		if eps, ok := parseEpisodes(in); !ok || !slices.Equal(eps, want) {
+			t.Errorf("%q: %v %v", in, eps, ok)
 		}
 	}
-	for _, in := range []string{"x", "3-1", "1,,2", "1-"} {
-		if _, ok := countEpisodes(in); ok {
+	for _, in := range []string{"x", "3-1", "1,,2", "1-", "1-999999"} {
+		if _, ok := parseEpisodes(in); ok {
 			t.Errorf("%q accepted", in)
 		}
+	}
+}
+
+// an entry AniDB lists as viewed keeps its viewdate: no edit is sent
+func TestMarkWatchedKeepsViewedEntry(t *testing.T) {
+	srv := newFakeServer(t, "k3y")
+	u, _ := newClient(srv, memState{}, 0)
+	defer u.Close()
+	srv.with(func() {
+		srv.reply["MYLISTADD"] = "310 MYLIST ENTRY ALREADY IN MYLIST\n77|2|3|4|5|1700000000|4|1700000500|0|0||0"
+	})
+	if err := u.MarkWatched(context.Background(), 17617, 1, time.Unix(1_800_000_000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, c := range srv.commands() {
+		if strings.HasPrefix(c, "MYLISTADD") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("MYLISTADD packets %d, want 1 (no edit)", n)
 	}
 }

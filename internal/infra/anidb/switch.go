@@ -60,10 +60,10 @@ func (s *Switch) Watched(ctx context.Context, a domain.Anime, episode string) er
 }
 
 // MyListProgress reads an anime's progress from AniDB.
-func (s *Switch) MyListProgress(ctx context.Context, aid int) (watched, total int, err error) {
+func (s *Switch) MyListProgress(ctx context.Context, aid int) (watched, total int, eps []int, err error) {
 	t := s.active()
 	if t == nil || t.UDP == nil {
-		return 0, 0, domain.ErrDisabled
+		return 0, 0, nil, domain.ErrDisabled
 	}
 	return t.UDP.MyListProgress(ctx, aid)
 }

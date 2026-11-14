@@ -278,3 +278,34 @@ func TestBackoff(t *testing.T) {
 		t.Errorf("%v %v %v", backoff(0), backoff(1), backoff(20))
 	}
 }
+
+// AniDB already lists episode 1: it is asked first and nothing is sent for it
+func TestWatchedPullsBeforeSending(t *testing.T) {
+	srv := newFakeServer(t, "k3y")
+	srv.with(func() { srv.reply["MYLIST"] = "312 MULTIPLE MYLIST ENTRIES\nFrieren|28|0|5|0|0|1|x" })
+	tr, db := newTracker(t, srv)
+	ctx := context.Background()
+	tr.Resolve(ctx, frieren)
+	tr.Watched(ctx, frieren, "1")
+	tr.Watched(ctx, frieren, "2")
+	tr.Close(5 * time.Second)
+
+	var adds, pulls []string
+	for _, c := range srv.commands() {
+		switch {
+		case strings.HasPrefix(c, "MYLISTADD"):
+			adds = append(adds, c)
+		case strings.HasPrefix(c, "MYLIST "):
+			pulls = append(pulls, c)
+		}
+	}
+	if len(adds) != 1 || !strings.Contains(adds[0], "epno=2") {
+		t.Errorf("MYLISTADD packets %q", adds)
+	}
+	if len(pulls) != 1 {
+		t.Errorf("MYLIST packets %q, want one per anime", pulls)
+	}
+	if n, _ := db.PendingCount(); n != 0 {
+		t.Errorf("pending %d", n)
+	}
+}

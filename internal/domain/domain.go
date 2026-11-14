@@ -96,11 +96,13 @@ type ListEntry struct {
 	Anime     Anime
 	AID       int
 	Watched   string    // last episode watched locally, "" = none
+	Seen      []string  // every episode watched locally
 	WatchedAt time.Time // zero = never
 	// AniDB's own count, valid when Synced is true.
 	Synced       bool
 	AniDBWatched int
 	AniDBTotal   int
+	AniDBEps     []int     // which episodes AniDB marks watched; nil = unknown
 	SyncedAt     time.Time // when AniDB was asked, zero = never
 }
 

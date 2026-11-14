@@ -40,11 +40,12 @@ func (f *fakeProvider) Stream(_ context.Context, ep domain.Episode, _ domain.Mod
 }
 
 type fakeStore struct {
-	hist  []domain.HistoryEntry
-	list  []domain.ListEntry
-	saved []domain.HistoryEntry
-	put   map[int]int
-	kv    map[string]string
+	hist   []domain.HistoryEntry
+	list   []domain.ListEntry
+	saved  []domain.HistoryEntry
+	put    map[int]int
+	kv     map[string]string
+	remote []int // what AniDB lists as watched
 }
 
 func (s *fakeStore) Get(k string) (string, bool, error) { v, ok := s.kv[k]; return v, ok, nil }
@@ -76,9 +77,12 @@ func (s *fakeStore) WatchedEpisodes(string) ([]string, error) {
 	}
 	return out, nil
 }
-func (s *fakeStore) RememberAnime(domain.Anime) error    { return nil }
-func (s *fakeStore) MyList() ([]domain.ListEntry, error) { return s.list, nil }
-func (s *fakeStore) PutMyList(aid, w, total int) error   { s.put[aid] = w; return nil }
+func (s *fakeStore) RememberAnime(domain.Anime) error           { return nil }
+func (s *fakeStore) MyList() ([]domain.ListEntry, error)        { return s.list, nil }
+func (s *fakeStore) PutMyList(aid, w, total int, _ []int) error { s.put[aid] = w; return nil }
+func (s *fakeStore) MyListEpisodes(string) ([]int, bool, error) {
+	return s.remote, s.remote != nil, nil
+}
 
 type fakePlayer struct{ played []domain.Media }
 
@@ -203,9 +207,9 @@ func TestPlayTracks(t *testing.T) {
 
 type fakeSync struct{ calls int }
 
-func (f *fakeSync) MyListProgress(_ context.Context, aid int) (int, int, error) {
+func (f *fakeSync) MyListProgress(_ context.Context, aid int) (int, int, []int, error) {
 	f.calls++
-	return 7, 12, nil
+	return 7, 12, nil, nil
 }
 
 func TestSyncMyList(t *testing.T) {
@@ -238,9 +242,9 @@ func TestMyListNeverShowsLessThanWatchedHere(t *testing.T) {
 	a, _, st, _ := newApp()
 	st.list = []domain.ListEntry{
 		// AniDB has not received the queued episodes yet
-		{Anime: domain.Anime{ID: "lag", Episodes: 12}, Watched: "8", Synced: true, AniDBWatched: 0},
+		{Anime: domain.Anime{ID: "lag", Episodes: 12}, Watched: "8", Seen: []string{"1", "2", "3", "4", "5", "6", "7", "8"}, Synced: true, AniDBWatched: 0},
 		// not in MyList on AniDB at all, but finished here
-		{Anime: domain.Anime{ID: "done", Episodes: 12}, Watched: "12", Synced: true},
+		{Anime: domain.Anime{ID: "done", Episodes: 12}, Watched: "12", Seen: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"}, Synced: true},
 	}
 	l, _ := a.MyList(context.Background())
 	got := map[string]Entry{}
@@ -275,9 +279,9 @@ func TestHydrateReadsTheAnimePage(t *testing.T) {
 
 type offSync struct{ calls int }
 
-func (o *offSync) MyListProgress(context.Context, int) (int, int, error) {
+func (o *offSync) MyListProgress(context.Context, int) (int, int, []int, error) {
 	o.calls++
-	return 0, 0, domain.ErrDisabled
+	return 0, 0, nil, domain.ErrDisabled
 }
 
 func TestSyncMyListStopsWhenAniDBIsOff(t *testing.T) {
@@ -309,12 +313,12 @@ type countSync struct {
 	fail map[int]bool
 }
 
-func (c *countSync) MyListProgress(_ context.Context, aid int) (int, int, error) {
+func (c *countSync) MyListProgress(_ context.Context, aid int) (int, int, []int, error) {
 	c.aids = append(c.aids, aid)
 	if c.fail[aid] {
-		return 0, 0, errors.New("no reply")
+		return 0, 0, nil, errors.New("no reply")
 	}
-	return 3, 24, nil
+	return 3, 24, nil, nil
 }
 
 func TestSyncSkipsWhatCannotHaveChanged(t *testing.T) {
@@ -366,5 +370,62 @@ func TestSyncBacksOffAfterAFailure(t *testing.T) {
 	a.SyncMyList(context.Background())
 	if !slices.Contains(cs.aids, 1) {
 		t.Error("a failure is forgotten after SyncRetry")
+	}
+}
+
+// an episode watched here and on AniDB counts once; local only adds
+func TestMyListMergesAniDBAndLocal(t *testing.T) {
+	a, _, st, _ := newApp()
+	st.list = []domain.ListEntry{{
+		Anime: domain.Anime{ID: "m", Episodes: 12}, Watched: "4", Seen: []string{"3", "4"},
+		Synced: true, AniDBWatched: 3, AniDBEps: []int{1, 2, 3},
+	}}
+	l, _ := a.MyList(context.Background())
+	if c := l.Entries[0].Counter; c != "4/12" {
+		t.Errorf("counter %q, want 4/12", c)
+	}
+}
+
+func TestDetailAddsAniDBEpisodes(t *testing.T) {
+	a, fp, st, _ := newApp()
+	fp.episodes = []domain.Episode{{ID: "e1", Number: "1"}, {ID: "e2", Number: "2"}, {ID: "e3", Number: "3"}}
+	st.remote = []int{1, 2}
+	d, err := a.Detail(context.Background(), domain.Anime{ID: "x", Title: "T"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.Watched["1"] || !d.Watched["2"] || d.Watched["3"] || d.Next != "3" {
+		t.Errorf("%+v", d)
+	}
+}
+
+func TestMarkWatchedRecordsWithoutPlaying(t *testing.T) {
+	a, _, st, pl := newApp()
+	tr := &fakeTracker{}
+	a.Tracker = tr
+	if err := a.MarkWatched(context.Background(), domain.Anime{ID: "x", Title: "T"}, domain.Episode{Number: "2"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(pl.played) != 0 || len(st.saved) != 1 || st.saved[0].Episode != "2" || len(tr.watched) != 1 {
+		t.Errorf("%v %v %v", pl.played, st.saved, tr.watched)
+	}
+}
+
+func TestRefreshMyListIgnoresAgeAndFailures(t *testing.T) {
+	a, _, st, _ := newApp()
+	sy := &countSync{fail: map[int]bool{}}
+	a.Sync = sy
+	st.kv = map[string]string{failKey(1): strconv.FormatInt(time.Now().Unix(), 10)}
+	st.list = []domain.ListEntry{
+		{AID: 1, Anime: domain.Anime{ID: "failed", Episodes: 24}},
+		{AID: 2, Anime: domain.Anime{ID: "fresh", Episodes: 24}, Synced: true, AniDBWatched: 3, SyncedAt: time.Now()},
+	}
+	a.SyncMyList(context.Background())
+	if len(sy.aids) != 0 {
+		t.Fatalf("plain sync asked %v", sy.aids)
+	}
+	a.RefreshMyList(context.Background())
+	if len(sy.aids) != 2 {
+		t.Errorf("refresh asked %v, want both", sy.aids)
 	}
 }
