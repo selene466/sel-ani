@@ -103,7 +103,7 @@ func (m *Model) renderTop(w int) string {
 			where += " / " + e.Anime.Name()
 		}
 	}
-	s := " sel-ani  " + where
+	s := " sel-ani  " + where + "  [" + string(m.opts.App.Mode) + "]"
 	if m.loading {
 		s += "  loading..."
 	} else if m.more {
@@ -122,14 +122,53 @@ func (m *Model) renderBottom(w int) string {
 		}
 		return m.st.info.Render(m.pad(" "+m.status, w))
 	}
-	if m.home {
-		return m.st.muted.Render(m.pad(" j/k move  enter select  1 2 section  / search  m sub/dub  q quit  (mouse: left column exit, right column enter)", w))
+	return m.footer(w, m.hints())
+}
+
+type hint struct{ key, label string }
+
+// hints lists the keys that work where the user is, the most useful first:
+// the footer drops the last ones when the terminal is narrow.
+func (m *Model) hints() []hint {
+	move, mode, quit := hint{"hjkl", "move"}, hint{"m", "sub/dub"}, hint{"q", "quit"}
+	switch {
+	case m.home:
+		return []hint{move, {"/", "search"}, mode, quit}
+	case m.level == levelEpisodes:
+		hs := []hint{move, {"space", "mark watched"}}
+		if m.sec != secSearch {
+			hs = append(hs, hint{"r", "refresh"})
+		}
+		return append(hs, mode, quit)
+	case m.sec == secSearch:
+		return []hint{move, {"/", "search"}, mode, quit}
 	}
-	if m.level == levelEpisodes {
-		return m.st.muted.Render(m.pad(" j/k move  l play  space mark watched  h back  q quit", w))
+	return []hint{move, {"/", "filter"}, {"s", "sort"}, {"r", "refresh"}, mode, quit}
+}
+
+// footer renders hints with the key in the accent color, the label muted,
+// and as many as fit in w cells.
+func (m *Model) footer(w int, hs []hint) string {
+	var b strings.Builder
+	b.WriteString(m.st.muted.Render(" "))
+	used := 1
+	for i, h := range hs {
+		need := ansi.StringWidth(h.key) + 1 + ansi.StringWidth(h.label)
+		if i > 0 {
+			need += 2
+		}
+		if used+need > w {
+			break
+		}
+		if i > 0 {
+			b.WriteString(m.st.muted.Render("  "))
+		}
+		b.WriteString(m.st.accent.Bold(true).Render(h.key))
+		b.WriteString(m.st.muted.Render(" " + h.label))
+		used += need
 	}
-	help := " j/k move  l open  h back  / filter  tab section  s sort  r refresh  m sub/dub  q quit  (mouse: left column back, right column open)"
-	return m.st.muted.Render(m.pad(help, w))
+	b.WriteString(strings.Repeat(" ", max(w-used, 0)))
+	return b.String()
 }
 
 func (m *Model) renderSections(w, h int) []string {
@@ -253,6 +292,12 @@ func (m *Model) episodeRows(w, h int) []string {
 		return []string{m.st.muted.Render(m.pad(" loading episodes...", w))}
 	}
 	eps := m.detail.Episodes
+	if m.detail.NoAudio {
+		return []string{
+			m.st.warn.Render(m.pad(fmt.Sprintf(" no %s episodes for this anime", m.detail.Mode), w)),
+			m.st.muted.Render(m.pad(" press m to switch the audio back", w)),
+		}
+	}
 	if len(eps) == 0 {
 		return []string{m.st.muted.Render(m.pad(" no episodes", w))}
 	}

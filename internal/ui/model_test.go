@@ -690,9 +690,8 @@ func TestSearchPopupCancelAndPrefill(t *testing.T) {
 	h.key("2")
 	h.typeText("abc")
 	h.key("enter")
-	h.key("tab") // My List
-	h.key("tab") // wraps to Latest
-	h.key("tab") // Search: asks again
+	h.key("1") // Latest
+	h.key("2") // Search: asks again
 	if !h.m.sdlg || h.m.sbuf != "abc" || h.m.sec != secLatest {
 		t.Errorf("sdlg=%v prefill=%q sec=%d", h.m.sdlg, h.m.sbuf, h.m.sec)
 	}
@@ -779,13 +778,13 @@ func TestSectionsAndMyList(t *testing.T) {
 	if s := h.screen(); !strings.Contains(s, "3/12") {
 		t.Errorf("counter missing:\n%s", s)
 	}
-	h.key("tab")
-	if h.m.sec != secLatest {
-		t.Errorf("tab wraps to latest: %d", h.m.sec)
-	}
-	h.key("shift+tab") // My List again
+	h.key("tab") // tabbing is gone
 	if h.m.sec != secMyList {
-		t.Errorf("shift+tab: %d", h.m.sec)
+		t.Errorf("tab must do nothing: %d", h.m.sec)
+	}
+	h.key("1")
+	if h.m.sec != secLatest {
+		t.Errorf("1 is Latest: %d", h.m.sec)
 	}
 }
 
@@ -966,5 +965,56 @@ func TestReloadKeepsCursorOnAnime(t *testing.T) {
 	h.send(listMsg{seq: 7, l: app.Listing{Entries: []app.Entry{e("c"), e("a"), e("b")}}})
 	if got, _ := h.m.selected(); got.Anime.ID != "c" {
 		t.Errorf("cursor on %q after reorder, want c", got.Anime.ID)
+	}
+}
+
+func TestFooterKeysAndNoRefreshInSearch(t *testing.T) {
+	h := newHarness(t, false)
+	if f := h.m.footer(120, h.m.hints()); !strings.Contains(ansi.Strip(f), "r refresh") || strings.Contains(ansi.Strip(f), "mouse") {
+		t.Errorf("footer %q", ansi.Strip(f))
+	}
+	h.m.sec = secSearch
+	for _, lvl := range []level{levelList, levelEpisodes} {
+		h.m.level = lvl
+		for _, hn := range h.m.hints() {
+			if hn.key == "r" {
+				t.Errorf("search level %v offers refresh", lvl)
+			}
+		}
+	}
+}
+
+// m in the episodes must keep the anime and say there is no such audio,
+// even when the other mode's list does not hold the anime.
+func TestModeSwitchInEpisodesKeepsAnime(t *testing.T) {
+	h := newHarness(t, false)
+	h.key("enter")
+	id, seq := h.m.detail.Anime.ID, h.m.seq
+	h.key("m")
+	if h.m.seq != seq || !h.m.stale {
+		t.Fatalf("the list must not reload under the episodes: seq %d->%d stale %v", seq, h.m.seq, h.m.stale)
+	}
+	if h.m.level != levelEpisodes || h.m.detail == nil || h.m.detail.Anime.ID != id {
+		t.Fatalf("left the anime: level %v detail %+v", h.m.level, h.m.detail)
+	}
+	// a list that lost the anime while its episodes are open closes them
+	// instead of showing another anime's name
+	h.send(listMsg{seq: h.m.seq, l: app.Listing{Entries: []app.Entry{{Anime: domain.Anime{ID: "other", Title: "Other"}}}}})
+	if h.m.level != levelList {
+		t.Fatal("episodes of a vanished anime stay open")
+	}
+	h.m.level = levelEpisodes
+	h.m.detail = &app.Detail{Anime: domain.Anime{ID: id}}
+	h.m.detail.NoAudio, h.m.detail.Mode = true, domain.ModeDub
+	if s := h.screen(); !strings.Contains(s, "no dub episodes") {
+		t.Errorf("no message:\n%s", s)
+	}
+}
+
+func TestModeShownInTopBarAfterM(t *testing.T) {
+	h := newHarness(t, false)
+	h.key("m")
+	if s := h.screen(); !strings.Contains(s, "[dub]") {
+		t.Errorf("mode not shown:\n%s", s)
 	}
 }

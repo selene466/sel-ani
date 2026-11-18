@@ -28,7 +28,8 @@ const (
 
 type refreshKey struct{}
 
-// WithRefresh returns a context whose Latest call skips the cached read.
+// WithRefresh returns a context whose Latest, Episodes and Info calls skip
+// the cached read.
 func WithRefresh(ctx context.Context) context.Context {
 	return context.WithValue(ctx, refreshKey{}, true)
 }
@@ -80,11 +81,12 @@ func (p *Provider) Latest(ctx context.Context, mode domain.Mode) ([]domain.Anime
 }
 
 func (p *Provider) Episodes(ctx context.Context, animeID string) ([]domain.Episode, error) {
+	skip, _ := ctx.Value(refreshKey{}).(bool)
 	p.mu.Lock()
 	want := p.known[animeID]
 	p.mu.Unlock()
 	stale := func(v []domain.Episode) bool { return len(v) < want }
-	return cached(p, false, "episodes:"+animeID, or(p.EpisodesTTL, EpisodesTTL), stale, func() ([]domain.Episode, error) {
+	return cached(p, skip, "episodes:"+animeID, or(p.EpisodesTTL, EpisodesTTL), stale, func() ([]domain.Episode, error) {
 		return p.Next.Episodes(ctx, animeID)
 	})
 }
@@ -93,7 +95,8 @@ func (p *Provider) Episodes(ctx context.Context, animeID string) ([]domain.Episo
 const InfoTTL = 7 * 24 * time.Hour
 
 func (p *Provider) Info(ctx context.Context, animeID string) (domain.Anime, error) {
-	v, err := cached(p, false, "info:"+animeID, InfoTTL, nil, func() ([]domain.Anime, error) {
+	skip, _ := ctx.Value(refreshKey{}).(bool)
+	v, err := cached(p, skip, "info:"+animeID, InfoTTL, nil, func() ([]domain.Anime, error) {
 		a, err := p.Next.Info(ctx, animeID)
 		if err != nil {
 			return nil, err

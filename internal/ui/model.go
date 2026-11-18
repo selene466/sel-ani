@@ -99,6 +99,7 @@ type Model struct {
 	status   string
 	statErr  bool
 	statSeq  int             // identifies the status the clear timer belongs to
+	stale    bool            // the list was loaded for another mode: reload it when the episodes close
 	keep     int             // cursor to restore after the next list load, -1 = none
 	hydrated map[string]bool // anime already looked up for a missing cover
 	mem      map[string]int  // last cursor per list view
@@ -136,9 +137,10 @@ type (
 		err error
 	}
 	detailMsg struct {
-		seq int
-		d   app.Detail
-		err error
+		seq     int
+		d       app.Detail
+		err     error
+		refresh bool // asked with r: say what changed
 	}
 	coverMsg struct {
 		url string
@@ -223,12 +225,18 @@ func (m *Model) sync() tea.Cmd {
 	return func() tea.Msg { return syncedMsg{err: a.SyncMyList(ctx)} }
 }
 
-func (m *Model) loadDetail(an domain.Anime) tea.Cmd {
+func (m *Model) loadDetail(an domain.Anime) tea.Cmd { return m.loadDetailWith(an, false) }
+
+// loadDetailWith loads the episodes of an; refresh skips the cached list.
+func (m *Model) loadDetailWith(an domain.Anime, refresh bool) tea.Cmd {
 	m.detSeq++
 	seq, a, ctx := m.detSeq, m.opts.App, m.ctx
+	if refresh {
+		ctx = cache.WithRefresh(ctx)
+	}
 	return func() tea.Msg {
 		d, err := a.Detail(ctx, an)
-		return detailMsg{seq: seq, d: d, err: err}
+		return detailMsg{seq: seq, d: d, err: err, refresh: refresh}
 	}
 }
 
@@ -350,6 +358,13 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 			}
 		}
 		m.status = ""
+		// never show another anime's name over the episodes of this one
+		if m.level == levelEpisodes && prev != "" {
+			if e, ok := m.selected(); !ok || e.Anime.ID != prev {
+				m.level, m.detail = levelList, nil
+				return m.say("that anime is not in this list any more", false)
+			}
+		}
 		if m.sec == secSearch && msg.l.Next != "" && len(m.list.Entries) < app.SearchLimit {
 			return m.searchMore(msg.l.Next)
 		}
@@ -380,8 +395,18 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		if msg.err != nil {
-			m.level = levelList
+			if !msg.refresh || m.detail == nil {
+				m.level = levelList // a failed refresh keeps the episodes it has
+			}
 			return m.say(msg.err.Error(), true)
+		}
+		var note tea.Cmd
+		if msg.refresh {
+			if m.detail != nil && len(msg.d.Episodes) > len(m.detail.Episodes) {
+				note = m.say(fmt.Sprintf("%d new episode(s)", len(msg.d.Episodes)-len(m.detail.Episodes)), false)
+			} else {
+				note = m.say("no new episodes", false)
+			}
 		}
 		m.detail = &msg.d
 		m.epCursor = 0
@@ -393,6 +418,7 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		if c, ok := m.epMem[msg.d.Anime.ID]; ok {
 			m.epCursor = min(c, max(len(msg.d.Episodes)-1, 0))
 		}
+		return note
 	case hydrateMsg:
 		if msg.err == nil {
 			m.updateAnime(msg.a)
@@ -519,10 +545,6 @@ func (m *Model) key(k tea.KeyPressMsg) tea.Cmd {
 	case "ctrl+c", "q":
 		m.quit = true
 		return nil
-	case "tab":
-		return m.switchSection(menuSections[(menuIndex(m.sec)+1)%len(menuSections)])
-	case "shift+tab":
-		return m.switchSection(menuSections[(max(menuIndex(m.sec), 0)+len(menuSections)-1)%len(menuSections)])
 	case "1", "2", "3":
 		return m.switchSection(menuSections[s[0]-'1'])
 	case "/":
@@ -611,6 +633,12 @@ func (m *Model) episodeKey(s string) tea.Cmd {
 		return m.playSelected()
 	case "space":
 		return m.markSelected()
+	case "r":
+		if m.sec != secSearch && m.detail != nil {
+			if e, ok := m.selected(); ok {
+				return tea.Batch(m.loadDetailWith(e.Anime, true), m.say("refreshing episodes...", false))
+			}
+		}
 	}
 	return nil
 }
@@ -739,8 +767,13 @@ func (m *Model) switchSection(s section) tea.Cmd {
 	}
 	m.level, m.detail = levelList, nil
 	if s == m.sec {
+		if m.stale {
+			m.stale = false
+			return m.load()
+		}
 		return nil
 	}
+	m.stale = false
 	m.sec = s
 	m.clearList()
 	return m.load()
@@ -822,9 +855,9 @@ func (m *Model) homeKey(s string) tea.Cmd {
 	switch s {
 	case "ctrl+c", "q":
 		m.quit = true
-	case "j", "down", "tab":
+	case "j", "down":
 		m.homeCursor = (m.homeCursor + 1) % len(homeItems)
-	case "k", "up", "shift+tab":
+	case "k", "up":
 		m.homeCursor = (m.homeCursor + len(homeItems) - 1) % len(homeItems)
 	case "g", "home":
 		m.homeCursor = 0
@@ -849,7 +882,16 @@ func (m *Model) toggleMode() tea.Cmd {
 		m.opts.App.SetMode(domain.ModeSub)
 	}
 	cmds := []tea.Cmd{m.say("mode: "+string(m.opts.App.Mode), false)}
-	if !m.home {
+	switch {
+	case m.home:
+	case m.level == levelEpisodes:
+		// the list of another mode may not hold this anime (the dub rail has
+		// only dubbed ones): stay on it and reload the list when leaving
+		m.stale = true
+		if e, ok := m.selected(); ok {
+			cmds = append(cmds, m.loadDetail(e.Anime))
+		}
+	default:
 		cmds = append(cmds, m.load())
 	}
 	return tea.Batch(cmds...)
@@ -942,6 +984,10 @@ func (m *Model) back() tea.Cmd {
 		m.quit = true
 	case m.level == levelEpisodes:
 		m.level, m.detail = levelList, nil
+		if m.stale {
+			m.stale = false
+			return m.load()
+		}
 	case m.filter != "":
 		m.setFilter("") // the filter goes first, then the list
 	default:
@@ -987,6 +1033,9 @@ func (m *Model) playSelected() tea.Cmd {
 	e, ok := m.selected()
 	if !ok || m.detail == nil || len(m.detail.Episodes) == 0 {
 		return nil
+	}
+	if m.detail.NoAudio {
+		return m.say("no "+string(m.detail.Mode)+" episodes for this anime", true)
 	}
 	ep := m.detail.Episodes[m.epCursor]
 	return tea.Batch(m.play(e.Anime, ep), m.say("starting episode "+ep.Number+"...", false))

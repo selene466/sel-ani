@@ -370,6 +370,8 @@ type Detail struct {
 	Episodes []domain.Episode
 	Watched  map[string]bool
 	Next     string // episode after the last watched one, "" = none
+	Mode     domain.Mode
+	NoAudio  bool
 }
 
 // Detail loads the episode list of an anime and its watch state.
@@ -382,7 +384,15 @@ func (a *App) Detail(ctx context.Context, an domain.Anime) (Detail, error) {
 	if err != nil {
 		return Detail{}, err
 	}
-	d := Detail{Anime: an, Episodes: eps, Watched: map[string]bool{}}
+	mode, _ := a.settings()
+	if an.Sub == 0 && an.Dub == 0 {
+		// stored anime carry no counts: ask the site's own page
+		if info, err := a.Provider.Info(ctx, an.ID); err == nil {
+			an.Sub, an.Dub = info.Sub, info.Dub
+		}
+	}
+	d := Detail{Anime: an, Episodes: eps, Watched: map[string]bool{}, Mode: mode}
+	d.NoAudio = an.Sub+an.Dub > 0 && an.Available(mode) == 0
 	// AniDB's list is the base, the local log only adds to it
 	if remote, _, err := a.Store.MyListEpisodes(an.ID); err == nil {
 		for _, n := range remote {

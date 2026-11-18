@@ -120,7 +120,7 @@ func TestMenuHasConfigAndPopupOpens(t *testing.T) {
 			t.Fatalf("line %d is %d cells wide with the popup open: %q", i, w, l)
 		}
 	}
-	if !strings.Contains(lines[0], "Main menu") || !strings.Contains(lines[29], "mouse") {
+	if !strings.Contains(lines[0], "Main menu") || !strings.Contains(lines[29], "sub/dub") {
 		t.Error("the screen must stay visible around the popup")
 	}
 }
@@ -155,7 +155,6 @@ func TestPopupKeysDoNotLeak(t *testing.T) {
 		t.Errorf("escape must cancel the edit without saving: %v", fs.calls)
 	}
 	h.key("m")
-	h.key("tab")
 	h.key("1")
 	if h.m.cfg.Mode != "sub" || h.m.sec != secLatest || !h.m.home {
 		t.Error("global keys must not act behind the popup")
