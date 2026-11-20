@@ -102,6 +102,22 @@ func num(s string) (float64, bool) {
 	return f, err == nil
 }
 
+type warnKey struct{}
+
+// WithWarn makes Play report its notes (e.g. a quality that is not offered)
+// to f instead of App.Warn, so a caller can show them where the user looks.
+func WithWarn(ctx context.Context, f func(string)) context.Context {
+	return context.WithValue(ctx, warnKey{}, f)
+}
+
+func (a *App) warnCtx(ctx context.Context, s string) {
+	if f, ok := ctx.Value(warnKey{}).(func(string)); ok {
+		f(s)
+		return
+	}
+	a.warn(s)
+}
+
 func (a *App) warn(s string) {
 	if a.Warn != nil {
 		a.Warn(s)
@@ -430,7 +446,7 @@ func (a *App) Play(ctx context.Context, an domain.Anime, ep domain.Episode) erro
 	}
 	l, fallback := SelectQuality(st.Links, quality)
 	if fallback {
-		a.warn(quality + " not found, using best")
+		a.warnCtx(ctx, fmt.Sprintf("%s not offered, using %s", quality, l.Quality))
 	}
 	if l.URL == "" {
 		return domain.ErrNoSources

@@ -154,6 +154,7 @@ type (
 	}
 	playedMsg struct {
 		title string
+		note  string // e.g. the asked quality was not offered
 		err   error
 	}
 	syncedMsg  struct{ err error }
@@ -259,7 +260,11 @@ func (m *Model) fetchCover(url string) tea.Cmd {
 func (m *Model) play(an domain.Anime, ep domain.Episode) tea.Cmd {
 	a, ctx := m.opts.App, m.ctx
 	title := an.Name() + " " + ep.Number
-	return func() tea.Msg { return playedMsg{title: title, err: a.Play(ctx, an, ep)} }
+	return func() tea.Msg {
+		var note string
+		err := a.Play(app.WithWarn(ctx, func(s string) { note = s }), an, ep)
+		return playedMsg{title: title, note: note, err: err}
+	}
 }
 
 func (m *Model) say(s string, isErr bool) tea.Cmd {
@@ -443,7 +448,7 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		}
 		// counters and [N] marks changed: reload without touching the cursor
 		m.keep = m.cursor
-		cmds := []tea.Cmd{m.load(), m.say("playing "+msg.title, false)}
+		cmds := []tea.Cmd{m.load(), m.say("playing "+msg.title+note(msg.note), false)}
 		if e, ok := m.selected(); ok && m.level == levelEpisodes {
 			cmds = append(cmds, m.loadDetail(e.Anime)) // [x] and > marks moved
 		}
@@ -1064,4 +1069,11 @@ func (m *Model) updateAnime(an domain.Anime) {
 	if m.detail != nil && m.detail.Anime.ID == an.ID {
 		m.detail.Anime = an
 	}
+}
+
+func note(s string) string {
+	if s == "" {
+		return ""
+	}
+	return " (" + s + ")"
 }
