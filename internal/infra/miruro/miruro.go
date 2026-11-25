@@ -177,8 +177,8 @@ func (p *Provider) Search(ctx context.Context, query, cursor string) (domain.Pag
 }
 
 // Latest returns the home page's newest releases for mode, most recent
-// first. The site keeps one rail per audio track: "raw" carries every new
-// release with its sub count, "dub" only dubbed ones; there is no sub rail.
+// first. The site keeps one rail per audio track: "sub" carries every new
+// release, "dub" only dubbed ones.
 func (p *Provider) Latest(ctx context.Context, mode domain.Mode) ([]domain.Anime, error) {
 	pg, err := p.data(ctx, "/", nil)
 	if err != nil {
@@ -194,21 +194,18 @@ func (p *Provider) Latest(ctx context.Context, mode domain.Mode) ([]domain.Anime
 		Format   string      `json:"format"`
 		Episode  json.Number `json:"episode"`
 	}
-	type rail struct {
-		Latest []item `json:"latest"`
-	}
 	v, err := into[struct {
 		Rails struct {
-			Raw rail `json:"raw"`
-			Dub rail `json:"dub"`
+			Sub []item `json:"sub"`
+			Dub []item `json:"dub"`
 		} `json:"rails"`
 	}](pg.last())
 	if err != nil {
 		return nil, fmt.Errorf("latest list: %w", err)
 	}
-	items := v.Rails.Raw.Latest
+	items := v.Rails.Sub
 	if mode == domain.ModeDub {
-		items = v.Rails.Dub.Latest
+		items = v.Rails.Dub
 	}
 	if len(items) == 0 {
 		return nil, fmt.Errorf("%w: no latest list on the home page (did the site change?)", domain.ErrNoResults)

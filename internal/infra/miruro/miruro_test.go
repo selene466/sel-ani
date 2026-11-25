@@ -138,14 +138,14 @@ func TestLatest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sub) != 54 || sub[0].ID != "sQsUsMbWyZMGoFsqbGsxSpfgGsIKJtiy" || sub[0].AltTitle != "Meitantei Precure!" || sub[0].Sub != 40 {
+	if len(sub) != 54 || sub[0].ID != "HlTCKAe6gmiHtSB9UvSN5e_0pYv7t6iV" || sub[0].AltTitle != "Tensei Shitara Ken Deshita 2nd Season" || sub[0].Sub != 9 {
 		t.Errorf("sub: %d items, first %+v", len(sub), sub[0])
 	}
 	dub, err := p.Latest(context.Background(), domain.ModeDub)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(dub) != 47 || dub[0].AltTitle != "Kyoufu Collector" || dub[0].Dub != 2 {
+	if len(dub) != 44 || dub[0].AltTitle != "Magic Knight Rayearth (2026)" || dub[0].Dub != 6 {
 		t.Errorf("dub: %d items, first %+v", len(dub), dub[0])
 	}
 }
